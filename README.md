@@ -2,6 +2,8 @@
 
 An interactive 3D viewer for the *power contour* of points sampling a signed distance field (SDF).
 
+**Live:** https://yig.github.io/powercontour-3d-web/
+
 Each sample point `p` with SDF value `d` becomes a weighted site: a sphere of radius `|d|`, signed by `d`. The viewer computes the power diagram of these sites, clipped to the box `[−1.5, 1.5]³`. The **power contour** is the set of faces between a positive cell and a negative cell, and it approximates the zero level set.
 
 You can also add one **tangent point** per sample: the closest point on the surface, with weight 0 and the opposite sign. This pulls the contour much closer to the true surface.
