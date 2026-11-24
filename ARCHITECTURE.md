@@ -45,18 +45,19 @@ Cost: O(n²) plane tests overall, which takes about 0.3 s for 1200 sites in Node
 - **Sampling** (`samplePoints`) is uniform random, jittered grid or regular grid, using the seeded PRNG `mulberry32`. The regular grid gets a jitter of about 1e-6 to avoid degenerate cases.
 - **Pipeline:** `compute()` samples points, builds the sites, runs `computePowerDiagram`, stores everything in `data`, then calls `rebuildAll()`. Changing shape, sampling, point count, seed or the tangent checkbox recomputes.
 - **Scene objects** (in `groups`):
-  - `spheres`: an `InstancedMesh` of radius `√w`, with `depthWrite` off.
-  - `centers`: small instanced dots; tangent sites are drawn smaller and lighter.
-  - `contour`: one triangle-fan `BufferGeometry` with per-vertex color, built by `buildContour`. Each face is emitted once, from its `+` side.
+  - `merged`: one `Mesh` holding **both** the input spheres (radius `√w`; tangent sites have radius 0 and are skipped) and the contour faces, built by `buildTransparent`. Each face is emitted once, from its `+` side. Each object (one sphere, or one contour face) owns a contiguous range of unshared vertices. The color attribute is RGBA: its alpha is the sphere or contour opacity, written by `applyVisuals`. A `cullBack` vertex attribute, used by a shader patch in `onBeforeCompile`, hides the back faces of spheres only; the contour stays two-sided.
+  - `centers`: small opaque instanced dots; tangent sites are drawn smaller and lighter.
   - `edges`: `LineSegments` of the face outlines.
   - `surface`: the overlay of the true surface.
 - **`applyVisuals()`** handles every display-only control: opacities, visibility, the slice plane and the slider readouts. These controls never recompute the diagram.
-- **Transparency and depth order:**
-  - `setOpacity` makes a material opaque, writing depth, when its opacity is ≥ 0.99. Otherwise the material is blended and does not write depth.
-  - **Contour triangles** are sorted back to front by `sortContour()`. It runs from the render loop whenever the view matrix changes. Triangles share no vertices, so only the index buffer is permuted.
-  - The contour material uses `forceSinglePass`. Otherwise three.js draws transparent DoubleSide meshes as all back faces, then all front faces, which undoes the sort.
-  - **Edges** are opaque and write depth. A transparent contour therefore covers edges behind it, and edges in front of it stay crisp; the contour's `polygonOffset` resolves edges that lie on the contour itself.
-  - **Draw order** for transparent objects: spheres (`renderOrder` 1), then the contour (2), then the true surface (3). The order *between* these objects, and among the sphere instances, is not sorted by depth. See the open git-bug issue.
+- **Transparency and depth order.** `sortTransparent()` runs from the render loop whenever the camera *position* changes, and permutes object ranges in `merged`'s index buffer so everything is drawn back to front:
+  - The sort key is the eye's power distance to the sites, `π_k = |e − p_k|² − w_k`. Along any ray from the eye, power cells are crossed in increasing `π`. On the ray, each site's power distance minus the shared `t²` is a straight line in `t`; the ray is in the cell whose line is lowest, and lines become lowest in order of increasing value at `t = 0` (Edelsbrunner's acyclicity theorem).
+  - Sphere `k` gets key `π_k`. A face between `i` and `j` gets `max(π_i, π_j)`, so it is drawn right after its farther cell; on ties the sphere is drawn first. Objects are drawn in decreasing key order.
+  - This is exact among contour faces, and exact for the part of each sphere inside its own cell. A red and a blue sphere never intersect, because their radii are distances to the surface, so no sphere crosses the contour. A sphere's parts outside its own cell lie inside other spheres of the same color, where order errors are nearly invisible: same color, same opacity.
+  - Hiding a group (opacity 0) drops its objects from the index buffer.
+  - `forceSinglePass` is needed: otherwise three.js draws transparent DoubleSide meshes as all back faces, then all front faces, which breaks the order. `depthWrite` is off unless everything drawn is fully opaque.
+  - **Edges** are opaque and write depth. The transparent mesh therefore covers edges behind it, and edges in front of it stay crisp; `polygonOffset` resolves edges that lie on the contour itself.
+  - The true-surface overlay is a separate transparent object drawn after `merged` (`renderOrder` 2), so it is not sorted with it.
 - **Colors:** `+` is red, `−` is blue, the contour is gold. Faces touching a tangent site turn green when the tint option is on.
 
 ## Testing and conventions
@@ -66,4 +67,6 @@ Cost: O(n²) plane tests overall, which takes about 0.3 s for 1200 sites in Node
   - Every face `i→j` has a matching face `j→i`.
   - A random point's lowest-power site has a non-empty cell.
   - Contour vertices have small `|sdf|`.
+  - Along rays from the eye, cells and contour faces appear in increasing power distance `π`.
+  - The page script runs in Node against the real `vendor/three.js` if `document`, `window`, `WebGLRenderer` and `OrbitControls` are stubbed.
 - Issues are tracked with git-bug (`git bug bug`).

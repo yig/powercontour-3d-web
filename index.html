@@ -169,7 +169,7 @@ scene.add(bboxHelper);
 const COL_POS = new THREE.Color(0xe0685a), COL_NEG = new THREE.Color(0x5a8fe0);
 const COL_PC = new THREE.Color(0xf0c040), COL_PC_T = new THREE.Color(0x60d0a0);
 
-let groups = { spheres: null, centers: null, contour: null, edges: null, surface: null };
+let groups = { merged: null, centers: null, edges: null, surface: null };
 let data = null; // { sites, weights, signs, isTangent, cells }
 
 function disposeGroup(obj) {
@@ -203,98 +203,157 @@ function compute() {
 }
 
 function rebuildAll() {
-  buildSpheres(); buildContour(); buildSurface(); updateStats();
+  buildCenters(); buildTransparent(); buildSurface(); updateStats();
 }
 
-function buildSpheres() {
-  disposeGroup(groups.spheres); disposeGroup(groups.centers);
-  const { sites, weights, signs } = data;
+function buildCenters() {
+  disposeGroup(groups.centers);
+  const { sites, signs, isTangent } = data;
   const n = sites.length;
-  const mat = new THREE.MeshStandardMaterial({ transparent: true, depthWrite: false, roughness: 0.6, clippingPlanes: clipPlanes() });
-  const inst = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 24, 16), mat, n);
-  const cmat = new THREE.MeshBasicMaterial({ clippingPlanes: clipPlanes() });
-  const cinst = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 8, 6), cmat, n);
+  const cinst = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 8, 6), new THREE.MeshBasicMaterial({ clippingPlanes: clipPlanes() }), n);
   const m = new THREE.Matrix4();
   for (let i = 0; i < n; i++) {
-    const r = Math.sqrt(weights[i]);
-    const [x, y, z] = sites[i];
-    m.makeScale(r, r, r).setPosition(x, y, z); inst.setMatrixAt(i, m);
-    const cr = data.isTangent[i] ? 0.012 : 0.018;
-    m.makeScale(cr, cr, cr).setPosition(x, y, z); cinst.setMatrixAt(i, m);
+    const cr = isTangent[i] ? 0.012 : 0.018;
+    m.makeScale(cr, cr, cr).setPosition(...sites[i]); cinst.setMatrixAt(i, m);
     const c = signs[i] > 0 ? COL_POS : COL_NEG;
-    inst.setColorAt(i, c); cinst.setColorAt(i, data.isTangent[i] ? c.clone().lerp(new THREE.Color(1, 1, 1), 0.5) : c);
+    cinst.setColorAt(i, isTangent[i] ? c.clone().lerp(new THREE.Color(1, 1, 1), 0.5) : c);
   }
-  inst.renderOrder = 1;
-  groups.spheres = inst; groups.centers = cinst;
-  scene.add(inst, cinst);
+  groups.centers = cinst;
+  scene.add(cinst);
   applyVisuals();
 }
 
-function buildContour() {
-  disposeGroup(groups.contour); disposeGroup(groups.edges);
-  const { cells, signs, isTangent } = data;
+// The input spheres and the contour faces live in ONE mesh so that they can be interleaved in a
+// single back-to-front order (see sortTransparent). Each object (one sphere, or one contour face)
+// owns a contiguous range of unshared vertices; sorting only permutes these ranges in the index buffer.
+const SPHERE_TEMPLATE = new THREE.SphereGeometry(1, 20, 12).toNonIndexed();
+
+function buildTransparent() {
+  disposeGroup(groups.merged); disposeGroup(groups.edges);
+  const { sites, weights, signs, isTangent, cells } = data;
   const tint = $('pcTangentColor').checked;
-  const pos = [], col = [], epos = [];
-  let nFaces = 0, area = 0;
-  cells.forEach((faces, i) => {
+  const tp = SPHERE_TEMPLATE.attributes.position.array, tn = SPHERE_TEMPLATE.attributes.normal.array;
+  const tv = tp.length / 3;
+
+  const sphereSites = [];
+  for (let k = 0; k < sites.length; k++) if (weights[k] > 0) sphereSites.push(k);
+  const faces = []; // { i: positive site, j: negative site, verts }
+  let area = 0;
+  cells.forEach((cf, i) => {
     if (signs[i] <= 0) return; // emit each separating face once, from its positive side
-    for (const f of faces) {
-      const j = f.label;
-      if (j < 0 || signs[j] > 0) continue;
-      nFaces++; area += PowerDiagram.polygonArea(f.verts);
-      const c = tint && (isTangent[i] || isTangent[j]) ? COL_PC_T : COL_PC;
-      const v = f.verts;
-      for (let k = 1; k + 1 < v.length; k++) {
-        for (const p of [v[0], v[k], v[k + 1]]) { pos.push(...p); col.push(c.r, c.g, c.b); }
-      }
-      for (let k = 0; k < v.length; k++) { epos.push(...v[k], ...v[(k + 1) % v.length]); }
+    for (const f of cf) if (f.label >= 0 && signs[f.label] < 0) { faces.push({ i, j: f.label, verts: f.verts }); area += PowerDiagram.polygonArea(f.verts); }
+  });
+
+  const nSph = sphereSites.length, nObj = nSph + faces.length;
+  const nSphV = nSph * tv;
+  let nV = nSphV;
+  for (const f of faces) nV += 3 * (f.verts.length - 2);
+  const pos = new Float32Array(3 * nV), nor = new Float32Array(3 * nV), col = new Float32Array(4 * nV), cull = new Float32Array(nV);
+  const start = new Uint32Array(nObj), count = new Uint32Array(nObj);
+  const siteA = new Int32Array(nObj), siteB = new Int32Array(nObj); // sphere: (k, -1); face: (i, j)
+  let v = 0;
+  const put = (p, n, c, cb) => {
+    pos.set(p, 3 * v); nor.set(n, 3 * v); col[4 * v] = c.r; col[4 * v + 1] = c.g; col[4 * v + 2] = c.b; cull[v] = cb; v++;
+  };
+  sphereSites.forEach((k, o) => {
+    start[o] = v; count[o] = tv; siteA[o] = k; siteB[o] = -1;
+    const r = Math.sqrt(weights[k]), p = sites[k], c = signs[k] > 0 ? COL_POS : COL_NEG;
+    for (let t = 0; t < tv; t++) {
+      put([p[0] + r * tp[3 * t], p[1] + r * tp[3 * t + 1], p[2] + r * tp[3 * t + 2]], [tn[3 * t], tn[3 * t + 1], tn[3 * t + 2]], c, 1);
     }
   });
-  // Triangles don't share vertices, so triangle t uses vertices 3t..3t+2 and the index buffer
-  // can be permuted freely by sortContour() to draw back to front.
-  const nTri = pos.length / 9;
+  const epos = [];
+  faces.forEach((f, fi) => {
+    const o = nSph + fi, vs = f.verts;
+    start[o] = v; siteA[o] = f.i; siteB[o] = f.j;
+    const c = tint && (isTangent[f.i] || isTangent[f.j]) ? COL_PC_T : COL_PC;
+    // Newell normal (DoubleSide lighting flips it for back faces).
+    const n = [0, 0, 0];
+    for (let k = 0; k < vs.length; k++) {
+      const a = vs[k], b = vs[(k + 1) % vs.length];
+      n[0] += (a[1] - b[1]) * (a[2] + b[2]); n[1] += (a[2] - b[2]) * (a[0] + b[0]); n[2] += (a[0] - b[0]) * (a[1] + b[1]);
+    }
+    const nl = Math.hypot(n[0], n[1], n[2]) || 1; n[0] /= nl; n[1] /= nl; n[2] /= nl;
+    for (let k = 1; k + 1 < vs.length; k++) { put(vs[0], n, c, 0); put(vs[k], n, c, 0); put(vs[k + 1], n, c, 0); }
+    count[o] = v - start[o];
+    for (let k = 0; k < vs.length; k++) epos.push(...vs[k], ...vs[(k + 1) % vs.length]);
+  });
+
   const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
-  const index = new THREE.BufferAttribute(Uint32Array.from({ length: 3 * nTri }, (_, k) => k), 1);
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+  g.setAttribute('color', new THREE.BufferAttribute(col, 4)); // RGBA: alpha carries per-object opacity
+  g.setAttribute('cullBack', new THREE.BufferAttribute(cull, 1));
+  const iota = Uint32Array.from({ length: nV }, (_, k) => k);
+  const index = new THREE.BufferAttribute(new Uint32Array(nV), 1);
   index.setUsage(THREE.DynamicDrawUsage);
   g.setIndex(index);
-  g.computeVertexNormals();
-  const cen = new Float32Array(3 * nTri);
-  for (let t = 0; t < nTri; t++) for (let k = 0; k < 3; k++) cen[3 * t + k] = (pos[9 * t + k] + pos[9 * t + 3 + k] + pos[9 * t + 6 + k]) / 3;
+  g.setDrawRange(0, 0);
+  // depthWrite is off: correctness comes from the draw order, not the depth buffer.
   // forceSinglePass: otherwise three.js draws transparent DoubleSide meshes as all back faces,
-  // then all front faces, which breaks the back-to-front triangle order.
-  const mat = new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, transparent: true, forceSinglePass: true,
-    roughness: 0.5, metalness: 0.05, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, clippingPlanes: clipPlanes() });
-  groups.contour = new THREE.Mesh(g, mat);
-  groups.contour.renderOrder = 2;
-  groups.contour.userData = { cen, depth: new Float32Array(nTri), order: new Uint32Array(nTri), lastView: null };
+  // then all front faces, which breaks the order.
+  const mat = new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, transparent: true, depthWrite: false,
+    forceSinglePass: true, roughness: 0.5, metalness: 0.05, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
+    clippingPlanes: clipPlanes() });
+  // Spheres show only their front faces (the contour shows both sides), so the back half of a
+  // sphere never blends over its own front half.
+  mat.onBeforeCompile = s => {
+    s.vertexShader = 'attribute float cullBack;\nvarying float vCullBack;\n' +
+      s.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n  vCullBack = cullBack;');
+    s.fragmentShader = 'varying float vCullBack;\n' +
+      s.fragmentShader.replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\n  if (vCullBack > 0.5 && !gl_FrontFacing) discard;');
+  };
+  groups.merged = new THREE.Mesh(g, mat);
+  groups.merged.renderOrder = 1;
+  groups.merged.userData = { nSph, nSphV, start, count, siteA, siteB, iota, keys: new Float64Array(nObj),
+    order: new Uint32Array(nObj), lastEye: null, alphas: null };
+
   const eg = new THREE.BufferGeometry();
   eg.setAttribute('position', new THREE.Float32BufferAttribute(epos, 3));
-  // Opaque edges are drawn in the opaque pass and write depth, so the transparent contour
+  // Opaque edges are drawn in the opaque pass and write depth, so the transparent mesh
   // correctly covers edges behind it and is hidden behind edges in front of it.
   groups.edges = new THREE.LineSegments(eg, new THREE.LineBasicMaterial({ color: 0x222222, clippingPlanes: clipPlanes() }));
-  scene.add(groups.contour, groups.edges);
-  data.nFaces = nFaces; data.area = area;
+  scene.add(groups.merged, groups.edges);
+  data.nFaces = faces.length; data.area = area;
   applyVisuals();
 }
 
-// Re-sort contour triangles back to front (by view-space depth of their centroids) whenever the camera moves.
-function sortContour() {
-  const mesh = groups.contour;
-  if (!mesh || !mesh.visible || !mesh.material.transparent) return;
-  const u = mesh.userData;
-  const view = camera.matrixWorldInverse.elements;
-  if (u.lastView && u.lastView.every((x, k) => x === view[k])) return;
-  u.lastView = view.slice();
-  const { cen, depth, order } = u;
-  const nTri = order.length;
-  // View-space z (negative in front of the camera): more negative is farther away.
-  const a = view[2], b = view[6], c = view[10], d = view[14];
-  for (let t = 0; t < nTri; t++) { depth[t] = a * cen[3 * t] + b * cen[3 * t + 1] + c * cen[3 * t + 2] + d; order[t] = t; }
-  order.sort((s, t) => depth[s] - depth[t]);
+// Draw spheres and contour faces back to front. Sort key: the eye's power distance to the sites,
+// pi_k = |e - p_k|^2 - w_k. Along any ray from the eye, power cells are crossed in increasing pi
+// (lower envelope of lines in the ray parameter), so decreasing pi is back to front for cells.
+//   sphere k            -> pi_k
+//   face between i, j   -> max(pi_i, pi_j): right after the farther cell (ties: sphere first)
+// This is exact among contour faces and for sphere parts inside their own cell. Sphere parts
+// outside their cell lie inside other spheres of the same color, where errors are hard to see.
+// The keys depend only on the eye position, so rotating in place needs no re-sort.
+function sortTransparent() {
+  const mesh = groups.merged;
+  if (!mesh || !mesh.visible) return;
+  const u = mesh.userData, e = camera.position;
+  if (u.lastEye && u.lastEye.equals(e)) return;
+  u.lastEye = e.clone();
+  const { sites, weights } = data;
+  const pi = new Float64Array(sites.length);
+  for (let k = 0; k < sites.length; k++) {
+    const p = sites[k];
+    pi[k] = (p[0] - e.x) ** 2 + (p[1] - e.y) ** 2 + (p[2] - e.z) ** 2 - weights[k];
+  }
+  const { nSph, start, count, siteA, siteB, keys, order, iota } = u;
+  const showSph = +$('sphOp').value > 0, showPc = +$('pcOp').value > 0;
+  let n = 0;
+  for (let o = 0; o < keys.length; o++) {
+    const isSph = o < nSph;
+    if (isSph ? !showSph : !showPc) continue;
+    keys[o] = isSph ? pi[siteA[o]] : Math.max(pi[siteA[o]], pi[siteB[o]]);
+    order[n++] = o;
+  }
+  const ord = order.subarray(0, n);
+  ord.sort((a, b) => (keys[b] - keys[a]) || ((a < nSph ? 0 : 1) - (b < nSph ? 0 : 1)));
   const idx = mesh.geometry.index;
-  for (let k = 0; k < nTri; k++) { const t = order[k]; idx.array[3 * k] = 3 * t; idx.array[3 * k + 1] = 3 * t + 1; idx.array[3 * k + 2] = 3 * t + 2; }
+  let w = 0;
+  for (let k = 0; k < n; k++) { const o = ord[k]; idx.array.set(iota.subarray(start[o], start[o] + count[o]), w); w += count[o]; }
+  mesh.geometry.setDrawRange(0, w);
+  idx.clearUpdateRanges(); idx.addUpdateRange(0, w);
   idx.needsUpdate = true;
 }
 
@@ -311,20 +370,29 @@ function buildSurface() {
   const grp = new THREE.Group();
   const mat = new THREE.MeshStandardMaterial({ color: 0xcccccc, transparent: true, depthWrite: false, roughness: 0.4, clippingPlanes: clipPlanes() });
   for (const m of shapes[$('shape').value].meshes()) { m.material = mat; grp.add(m); }
-  grp.renderOrder = 3;
+  grp.renderOrder = 2;
   groups.surface = grp; scene.add(grp);
   applyVisuals();
 }
 
 function applyVisuals() {
   const sphOp = +$('sphOp').value, pcOp = +$('pcOp').value, surfOp = +$('surfOp').value;
-  if (groups.spheres) { setOpacity(groups.spheres.material, sphOp); groups.spheres.visible = sphOp > 0; }
-  if (groups.centers) groups.centers.visible = $('centers').checked;
-  if (groups.contour) {
-    setOpacity(groups.contour.material, pcOp);
-    groups.contour.visible = pcOp > 0;
-    groups.contour.userData.lastView = null; // force a re-sort
+  if (groups.merged) {
+    const mesh = groups.merged, u = mesh.userData;
+    if (!u.alphas || u.alphas[0] !== sphOp || u.alphas[1] !== pcOp) {
+      const ca = mesh.geometry.attributes.color, a = ca.array, nV = a.length / 4;
+      for (let k = 0; k < nV; k++) a[4 * k + 3] = k < u.nSphV ? sphOp : pcOp;
+      ca.needsUpdate = true;
+      u.alphas = [sphOp, pcOp];
+      u.lastEye = null; // the set of drawn objects may have changed: re-sort
+    }
+    // When everything drawn is opaque, use the opaque pass so depth is written (matters for the true-surface overlay).
+    const opaque = (sphOp === 0 || sphOp >= 0.99) && (pcOp === 0 || pcOp >= 0.99);
+    if (mesh.material.transparent === opaque) { mesh.material.transparent = !opaque; mesh.material.needsUpdate = true; }
+    mesh.material.depthWrite = opaque;
+    mesh.visible = sphOp > 0 || pcOp > 0;
   }
+  if (groups.centers) groups.centers.visible = $('centers').checked;
   if (groups.edges) { groups.edges.visible = $('pcEdges').checked; groups.edges.material.color.set(pcOp > 0 ? 0x222222 : COL_PC); }
   if (groups.surface) {
     groups.surface.visible = surfOp > 0;
@@ -353,7 +421,7 @@ $('npts').addEventListener('input', applyVisuals);
 $('npts').addEventListener('change', compute);
 for (const id of ['sphOp', 'pcOp', 'surfOp', 'sliceZ']) $(id).addEventListener('input', applyVisuals);
 for (const id of ['centers', 'pcEdges', 'slice', 'bbox']) $(id).addEventListener('change', applyVisuals);
-$('pcTangentColor').addEventListener('change', buildContour);
+$('pcTangentColor').addEventListener('change', buildTransparent);
 
 function resize() {
   const w = window.innerWidth, h = window.innerHeight;
@@ -364,8 +432,7 @@ resize();
 compute();
 renderer.setAnimationLoop(() => {
   controls.update();
-  camera.updateMatrixWorld(); // so sortContour sees this frame's view matrix
-  sortContour();
+  sortTransparent();
   renderer.render(scene, camera);
 });
 </script>
