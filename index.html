@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Power Contour Viewer</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #1b1d22; color: #e6e6e6;
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  #view { position: absolute; inset: 0; }
+  #panel { position: absolute; top: 10px; left: 10px; width: 270px; max-height: calc(100% - 20px);
+    overflow-y: auto; background: rgba(30, 32, 38, 0.92); border: 1px solid #3a3d45; border-radius: 8px;
+    padding: 10px 12px; box-sizing: border-box; }
+  h1 { font-size: 14px; margin: 0 0 6px; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: #9aa0ab; margin: 12px 0 4px; }
+  .row { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
+  .row label { flex: 0 0 105px; }
+  .row input[type=range] { flex: 1; min-width: 0; }
+  .row .val { flex: 0 0 34px; text-align: right; font-variant-numeric: tabular-nums; color: #b8bec9; }
+  .check { display: flex; align-items: center; gap: 6px; margin: 4px 0; cursor: pointer; }
+  select, input[type=number] { flex: 1; background: #2a2d34; color: inherit; border: 1px solid #444852;
+    border-radius: 4px; padding: 2px 4px; min-width: 0; }
+  button { background: #3b6ea8; color: white; border: 0; border-radius: 4px; padding: 5px 10px; cursor: pointer; }
+  button:hover { background: #4a80bd; }
+  #stats { margin-top: 10px; color: #9aa0ab; font-size: 12px; white-space: pre-line; }
+  .legend { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+<script src="powerdiagram.js"></script>
+</head>
+<body>
+<div id="view"></div>
+<div id="panel">
+  <h1>Power contour of an SDF</h1>
+  <div style="color:#9aa0ab;font-size:12px">
+    <span class="legend" style="background:#e0685a"></span>d &gt; 0 &nbsp;
+    <span class="legend" style="background:#5a8fe0"></span>d &lt; 0 &nbsp;
+    <span class="legend" style="background:#f0c040"></span>contour
+  </div>
+
+  <h2>Input</h2>
+  <div class="row"><label>Shape</label>
+    <select id="shape">
+      <option value="sphere">Sphere</option>
+      <option value="box">Box</option>
+      <option value="torus" selected>Torus</option>
+      <option value="twospheres">Two spheres (union)</option>
+    </select></div>
+  <div class="row"><label>Sampling</label>
+    <select id="sampling">
+      <option value="random">Uniform random</option>
+      <option value="grid">Jittered grid</option>
+      <option value="regular">Regular grid</option>
+    </select></div>
+  <div class="row"><label>Points</label><input type="range" id="npts" min="10" max="1500" step="10" value="300"><span class="val" id="npts-v"></span></div>
+  <div class="row"><label>Seed</label><input type="number" id="seed" value="1"></div>
+  <label class="check"><input type="checkbox" id="tangent"> Add tangent points</label>
+
+  <h2>Input spheres</h2>
+  <div class="row"><label>Opacity</label><input type="range" id="sphOp" min="0" max="1" step="0.01" value="0.15"><span class="val" id="sphOp-v"></span></div>
+  <label class="check"><input type="checkbox" id="centers" checked> Show centers</label>
+
+  <h2>Power contour</h2>
+  <div class="row"><label>Opacity</label><input type="range" id="pcOp" min="0" max="1" step="0.01" value="0.85"><span class="val" id="pcOp-v"></span></div>
+  <label class="check"><input type="checkbox" id="pcEdges" checked> Show edges</label>
+  <label class="check"><input type="checkbox" id="pcTangentColor"> Tint faces touching tangent points</label>
+
+  <h2>Reference</h2>
+  <div class="row"><label>True surface</label><input type="range" id="surfOp" min="0" max="1" step="0.01" value="0"><span class="val" id="surfOp-v"></span></div>
+  <label class="check"><input type="checkbox" id="slice"> Slice (keep z &lt; …)</label>
+  <div class="row"><label>Slice z</label><input type="range" id="sliceZ" min="-1.5" max="1.5" step="0.01" value="0"><span class="val" id="sliceZ-v"></span></div>
+  <label class="check"><input type="checkbox" id="bbox" checked> Show bounding box</label>
+
+  <div id="stats"></div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const B = 1.5; // domain is [-B, B]^3
+const $ = id => document.getElementById(id);
+
+// ---------- SDFs ----------
+const shapes = {
+  sphere: {
+    sdf: ([x, y, z]) => Math.hypot(x, y, z) - 0.8,
+    meshes: () => [new THREE.Mesh(new THREE.SphereGeometry(0.8, 64, 32))],
+  },
+  box: {
+    sdf: ([x, y, z]) => {
+      const h = [0.7, 0.5, 0.4];
+      const q = [Math.abs(x) - h[0], Math.abs(y) - h[1], Math.abs(z) - h[2]];
+      return Math.hypot(Math.max(q[0], 0), Math.max(q[1], 0), Math.max(q[2], 0)) + Math.min(Math.max(q[0], q[1], q[2]), 0);
+    },
+    meshes: () => [new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.0, 0.8))],
+  },
+  torus: { // axis = z
+    sdf: ([x, y, z]) => Math.hypot(Math.hypot(x, y) - 0.75, z) - 0.3,
+    meshes: () => [new THREE.Mesh(new THREE.TorusGeometry(0.75, 0.3, 32, 96))],
+  },
+  twospheres: {
+    sdf: ([x, y, z]) => Math.min(Math.hypot(x - 0.45, y, z) - 0.55, Math.hypot(x + 0.45, y, z) - 0.55),
+    meshes: () => [-0.45, 0.45].map(cx => {
+      const m = new THREE.Mesh(new THREE.SphereGeometry(0.55, 64, 32)); m.position.x = cx; return m;
+    }),
+  },
+};
+
+function gradient(sdf, p) {
+  const h = 1e-5, g = [0, 0, 0];
+  for (let k = 0; k < 3; k++) {
+    const a = p.slice(), b = p.slice(); a[k] += h; b[k] -= h;
+    g[k] = (sdf(a) - sdf(b)) / (2 * h);
+  }
+  const l = Math.hypot(g[0], g[1], g[2]) || 1;
+  return [g[0] / l, g[1] / l, g[2] / l];
+}
+
+// ---------- Sampling ----------
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+function samplePoints(n, mode, seed) {
+  const rnd = mulberry32(seed);
+  const pts = [];
+  if (mode === 'random') {
+    for (let i = 0; i < n; i++) pts.push([(rnd() * 2 - 1) * B, (rnd() * 2 - 1) * B, (rnd() * 2 - 1) * B]);
+  } else {
+    const k = Math.max(2, Math.round(Math.cbrt(n)));
+    const s = 2 * B / k;
+    const jit = mode === 'grid' ? 0.8 : 0.0;
+    for (let i = 0; i < k; i++) for (let j = 0; j < k; j++) for (let l = 0; l < k; l++) {
+      // Tiny jitter even for the regular grid avoids exactly degenerate (co-spherical) configurations.
+      const e = () => (rnd() - 0.5) * (jit * s + 1e-6);
+      pts.push([-B + (i + 0.5) * s + e(), -B + (j + 0.5) * s + e(), -B + (l + 0.5) * s + e()]);
+    }
+  }
+  return pts;
+}
+
+// ---------- Three.js scene ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.localClippingEnabled = true;
+$('view').appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1b1d22);
+const camera = new THREE.PerspectiveCamera(40, 1, 0.01, 100);
+camera.position.set(3.2, -4.2, 3.0);
+camera.up.set(0, 0, 1);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+scene.add(new THREE.HemisphereLight(0xffffff, 0x404050, 1.6));
+const dl = new THREE.DirectionalLight(0xffffff, 1.4); dl.position.set(3, -2, 5); camera.add(dl); scene.add(camera);
+
+const clipPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0);
+const clipPlanes = () => ($('slice').checked ? [clipPlane] : []);
+
+const bboxHelper = new THREE.Box3Helper(new THREE.Box3(new THREE.Vector3(-B, -B, -B), new THREE.Vector3(B, B, B)), 0x555a66);
+scene.add(bboxHelper);
+
+const COL_POS = new THREE.Color(0xe0685a), COL_NEG = new THREE.Color(0x5a8fe0);
+const COL_PC = new THREE.Color(0xf0c040), COL_PC_T = new THREE.Color(0x60d0a0);
+
+let groups = { spheres: null, centers: null, contour: null, edges: null, surface: null };
+let data = null; // { sites, weights, signs, isTangent, cells }
+
+function disposeGroup(obj) {
+  if (!obj) return;
+  scene.remove(obj);
+  obj.traverse(o => { o.geometry?.dispose(); (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => m?.dispose()); });
+}
+
+function compute() {
+  const shape = shapes[$('shape').value];
+  const inputs = samplePoints(+$('npts').value, $('sampling').value, +$('seed').value | 0);
+  const sites = [], weights = [], signs = [], isTangent = [];
+  for (const p of inputs) {
+    const d = shape.sdf(p);
+    sites.push(p); weights.push(d * d); signs.push(d >= 0 ? 1 : -1); isTangent.push(false);
+  }
+  if ($('tangent').checked) {
+    for (const p of inputs) {
+      const d = shape.sdf(p);
+      if (Math.abs(d) < 1e-9) continue; // already on the surface
+      const g = gradient(shape.sdf, p);
+      sites.push([p[0] - d * g[0], p[1] - d * g[1], p[2] - d * g[2]]);
+      weights.push(0); signs.push(d >= 0 ? -1 : 1); isTangent.push(true);
+    }
+  }
+  const t0 = performance.now();
+  const cells = PowerDiagram.computePowerDiagram(sites, weights, [-B, -B, -B], [B, B, B]);
+  const ms = performance.now() - t0;
+  data = { sites, weights, signs, isTangent, cells, ms, nInputs: inputs.length };
+  rebuildAll();
+}
+
+function rebuildAll() {
+  buildSpheres(); buildContour(); buildSurface(); updateStats();
+}
+
+function buildSpheres() {
+  disposeGroup(groups.spheres); disposeGroup(groups.centers);
+  const { sites, weights, signs } = data;
+  const n = sites.length;
+  const mat = new THREE.MeshStandardMaterial({ transparent: true, depthWrite: false, roughness: 0.6, clippingPlanes: clipPlanes() });
+  const inst = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 24, 16), mat, n);
+  const cmat = new THREE.MeshBasicMaterial({ clippingPlanes: clipPlanes() });
+  const cinst = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 8, 6), cmat, n);
+  const m = new THREE.Matrix4();
+  for (let i = 0; i < n; i++) {
+    const r = Math.sqrt(weights[i]);
+    const [x, y, z] = sites[i];
+    m.makeScale(r, r, r).setPosition(x, y, z); inst.setMatrixAt(i, m);
+    const cr = data.isTangent[i] ? 0.012 : 0.018;
+    m.makeScale(cr, cr, cr).setPosition(x, y, z); cinst.setMatrixAt(i, m);
+    const c = signs[i] > 0 ? COL_POS : COL_NEG;
+    inst.setColorAt(i, c); cinst.setColorAt(i, data.isTangent[i] ? c.clone().lerp(new THREE.Color(1, 1, 1), 0.5) : c);
+  }
+  inst.renderOrder = 2;
+  groups.spheres = inst; groups.centers = cinst;
+  scene.add(inst, cinst);
+  applyVisuals();
+}
+
+function buildContour() {
+  disposeGroup(groups.contour); disposeGroup(groups.edges);
+  const { cells, signs, isTangent } = data;
+  const tint = $('pcTangentColor').checked;
+  const pos = [], col = [], epos = [];
+  let nFaces = 0, area = 0;
+  cells.forEach((faces, i) => {
+    if (signs[i] <= 0) return; // emit each separating face once, from its positive side
+    for (const f of faces) {
+      const j = f.label;
+      if (j < 0 || signs[j] > 0) continue;
+      nFaces++; area += PowerDiagram.polygonArea(f.verts);
+      const c = tint && (isTangent[i] || isTangent[j]) ? COL_PC_T : COL_PC;
+      const v = f.verts;
+      for (let k = 1; k + 1 < v.length; k++) {
+        for (const p of [v[0], v[k], v[k + 1]]) { pos.push(...p); col.push(c.r, c.g, c.b); }
+      }
+      for (let k = 0; k < v.length; k++) { epos.push(...v[k], ...v[(k + 1) % v.length]); }
+    }
+  });
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  g.computeVertexNormals();
+  const mat = new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, transparent: true,
+    roughness: 0.5, metalness: 0.05, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, clippingPlanes: clipPlanes() });
+  groups.contour = new THREE.Mesh(g, mat);
+  groups.contour.renderOrder = 1;
+  const eg = new THREE.BufferGeometry();
+  eg.setAttribute('position', new THREE.Float32BufferAttribute(epos, 3));
+  groups.edges = new THREE.LineSegments(eg, new THREE.LineBasicMaterial({ color: 0x222222, transparent: true, clippingPlanes: clipPlanes() }));
+  scene.add(groups.contour, groups.edges);
+  data.nFaces = nFaces; data.area = area;
+  applyVisuals();
+}
+
+function buildSurface() {
+  disposeGroup(groups.surface);
+  const grp = new THREE.Group();
+  const mat = new THREE.MeshStandardMaterial({ color: 0xcccccc, transparent: true, depthWrite: false, roughness: 0.4, clippingPlanes: clipPlanes() });
+  for (const m of shapes[$('shape').value].meshes()) { m.material = mat; grp.add(m); }
+  grp.renderOrder = 3;
+  groups.surface = grp; scene.add(grp);
+  applyVisuals();
+}
+
+function applyVisuals() {
+  const sphOp = +$('sphOp').value, pcOp = +$('pcOp').value, surfOp = +$('surfOp').value;
+  if (groups.spheres) { groups.spheres.material.opacity = sphOp; groups.spheres.visible = sphOp > 0; }
+  if (groups.centers) groups.centers.visible = $('centers').checked;
+  if (groups.contour) {
+    groups.contour.material.opacity = pcOp;
+    groups.contour.material.depthWrite = pcOp >= 0.99;
+    groups.contour.visible = pcOp > 0;
+  }
+  if (groups.edges) { groups.edges.visible = $('pcEdges').checked; groups.edges.material.opacity = Math.max(pcOp, 0.35);
+    groups.edges.material.color.set(pcOp > 0 ? 0x222222 : COL_PC); }
+  if (groups.surface) {
+    groups.surface.visible = surfOp > 0;
+    groups.surface.children.forEach(m => { m.material.opacity = surfOp; });
+  }
+  bboxHelper.visible = $('bbox').checked;
+  clipPlane.constant = +$('sliceZ').value;
+  const planes = clipPlanes();
+  scene.traverse(o => { if (o.material && o !== bboxHelper) o.material.clippingPlanes = planes; });
+  for (const id of ['npts', 'sphOp', 'pcOp', 'surfOp', 'sliceZ']) $(id + '-v').textContent = (+$(id).value).toString().slice(0, 5);
+}
+
+function updateStats() {
+  const nt = data.isTangent.filter(Boolean).length;
+  const empty = data.cells.filter(c => c.length === 0).length;
+  $('stats').textContent =
+    `${data.nInputs} input + ${nt} tangent sites\n` +
+    `${empty} empty power cells\n` +
+    `${data.nFaces} contour faces, area ${data.area.toFixed(3)}\n` +
+    `power diagram: ${data.ms.toFixed(0)} ms`;
+}
+
+// ---------- UI wiring ----------
+for (const id of ['shape', 'sampling', 'seed', 'tangent']) $(id).addEventListener('change', compute);
+$('npts').addEventListener('input', applyVisuals);
+$('npts').addEventListener('change', compute);
+for (const id of ['sphOp', 'pcOp', 'surfOp', 'sliceZ']) $(id).addEventListener('input', applyVisuals);
+for (const id of ['centers', 'pcEdges', 'slice', 'bbox']) $(id).addEventListener('change', applyVisuals);
+$('pcTangentColor').addEventListener('change', buildContour);
+
+function resize() {
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h); camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize);
+resize();
+compute();
+renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+</script>
+</body>
+</html>
