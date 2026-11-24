@@ -8,12 +8,7 @@ You can also add one **tangent point** per sample: the closest point on the surf
 
 ## Running
 
-There is no build step. Open `index.html` in a browser. three.js loads from a CDN, so you need internet access. If your browser won't load the page from disk, serve the folder instead:
-
-```sh
-python3 -m http.server
-# then open http://localhost:8000
-```
+There is no build step and no network access needed. Open `index.html` directly in a browser. three.js is in `vendor/`. To update it, run `node vendor/update-three.mjs [version]`.
 
 ## Controls
 

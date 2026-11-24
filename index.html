@@ -25,12 +25,8 @@
   #stats { margin-top: 10px; color: #9aa0ab; font-size: 12px; white-space: pre-line; }
   .legend { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; }
 </style>
-<script type="importmap">
-{ "imports": {
-  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
-  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
-} }
-</script>
+<script src="vendor/three.js"></script>
+<script src="vendor/OrbitControls.js"></script>
 <script src="powerdiagram.js"></script>
 </head>
 <body>
@@ -80,8 +76,7 @@
 </div>
 
 <script type="module">
-import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+const { OrbitControls } = THREE; // THREE is the global from vendor/three.js
 
 const B = 1.5; // domain is [-B, B]^3
 const $ = id => document.getElementById(id);

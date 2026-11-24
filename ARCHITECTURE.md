@@ -1,15 +1,17 @@
 # Architecture
 
 A static web page that shows the 3D *power contour* of points sampling a signed distance field (SDF).
-There is no build step. `index.html` loads three.js from jsdelivr, so it needs internet access.
-To run it, open `index.html`, or run `python3 -m http.server` here and browse to `http://localhost:8000`.
+There is no build step and no network access needed: open `index.html` from disk.
+Everything is loaded as classic `<script>` tags, because browsers refuse to load ES modules from `file://` pages.
 
 ## Files
 
 | File | Role |
 |---|---|
 | `powerdiagram.js` | Pure geometry: the 3D power diagram. No three.js. Runs in the browser (global `PowerDiagram`) and in Node (`require`). |
-| `index.html` | UI and rendering: SDFs, sampling, building sites, three.js scene, controls. All code is in one inline `<script type="module">`. |
+| `index.html` | UI and rendering: SDFs, sampling, building sites, three.js scene, controls. All code is in one inline `<script type="module">`, which uses the global `THREE`. |
+| `vendor/three.js`, `vendor/OrbitControls.js` | three.js r170, converted from its ES modules into classic scripts that define `window.THREE` and `THREE.OrbitControls`. Generated; do not edit. |
+| `vendor/update-three.mjs` | Regenerates the files above from jsdelivr: `node vendor/update-three.mjs [version]`. It stops with an error if a three.js version no longer has the single-file, import-free form it expects. |
 | `AGENTS.md` | The original spec. |
 
 ## Math
