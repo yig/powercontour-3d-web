@@ -224,7 +224,7 @@ function buildSpheres() {
     const c = signs[i] > 0 ? COL_POS : COL_NEG;
     inst.setColorAt(i, c); cinst.setColorAt(i, data.isTangent[i] ? c.clone().lerp(new THREE.Color(1, 1, 1), 0.5) : c);
   }
-  inst.renderOrder = 2;
+  inst.renderOrder = 1;
   groups.spheres = inst; groups.centers = cinst;
   scene.add(inst, cinst);
   applyVisuals();
@@ -250,20 +250,60 @@ function buildContour() {
       for (let k = 0; k < v.length; k++) { epos.push(...v[k], ...v[(k + 1) % v.length]); }
     }
   });
+  // Triangles don't share vertices, so triangle t uses vertices 3t..3t+2 and the index buffer
+  // can be permuted freely by sortContour() to draw back to front.
+  const nTri = pos.length / 9;
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  const index = new THREE.BufferAttribute(Uint32Array.from({ length: 3 * nTri }, (_, k) => k), 1);
+  index.setUsage(THREE.DynamicDrawUsage);
+  g.setIndex(index);
   g.computeVertexNormals();
-  const mat = new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, transparent: true,
+  const cen = new Float32Array(3 * nTri);
+  for (let t = 0; t < nTri; t++) for (let k = 0; k < 3; k++) cen[3 * t + k] = (pos[9 * t + k] + pos[9 * t + 3 + k] + pos[9 * t + 6 + k]) / 3;
+  // forceSinglePass: otherwise three.js draws transparent DoubleSide meshes as all back faces,
+  // then all front faces, which breaks the back-to-front triangle order.
+  const mat = new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, transparent: true, forceSinglePass: true,
     roughness: 0.5, metalness: 0.05, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, clippingPlanes: clipPlanes() });
   groups.contour = new THREE.Mesh(g, mat);
-  groups.contour.renderOrder = 1;
+  groups.contour.renderOrder = 2;
+  groups.contour.userData = { cen, depth: new Float32Array(nTri), order: new Uint32Array(nTri), lastView: null };
   const eg = new THREE.BufferGeometry();
   eg.setAttribute('position', new THREE.Float32BufferAttribute(epos, 3));
-  groups.edges = new THREE.LineSegments(eg, new THREE.LineBasicMaterial({ color: 0x222222, transparent: true, clippingPlanes: clipPlanes() }));
+  // Opaque edges are drawn in the opaque pass and write depth, so the transparent contour
+  // correctly covers edges behind it and is hidden behind edges in front of it.
+  groups.edges = new THREE.LineSegments(eg, new THREE.LineBasicMaterial({ color: 0x222222, clippingPlanes: clipPlanes() }));
   scene.add(groups.contour, groups.edges);
   data.nFaces = nFaces; data.area = area;
   applyVisuals();
+}
+
+// Re-sort contour triangles back to front (by view-space depth of their centroids) whenever the camera moves.
+function sortContour() {
+  const mesh = groups.contour;
+  if (!mesh || !mesh.visible || !mesh.material.transparent) return;
+  const u = mesh.userData;
+  const view = camera.matrixWorldInverse.elements;
+  if (u.lastView && u.lastView.every((x, k) => x === view[k])) return;
+  u.lastView = view.slice();
+  const { cen, depth, order } = u;
+  const nTri = order.length;
+  // View-space z (negative in front of the camera): more negative is farther away.
+  const a = view[2], b = view[6], c = view[10], d = view[14];
+  for (let t = 0; t < nTri; t++) { depth[t] = a * cen[3 * t] + b * cen[3 * t + 1] + c * cen[3 * t + 2] + d; order[t] = t; }
+  order.sort((s, t) => depth[s] - depth[t]);
+  const idx = mesh.geometry.index;
+  for (let k = 0; k < nTri; k++) { const t = order[k]; idx.array[3 * k] = 3 * t; idx.array[3 * k + 1] = 3 * t + 1; idx.array[3 * k + 2] = 3 * t + 2; }
+  idx.needsUpdate = true;
+}
+
+// Fully opaque objects go in the opaque pass and write depth; others are blended without depth writes.
+function setOpacity(material, opacity) {
+  const transparent = opacity < 0.99;
+  if (material.transparent !== transparent) { material.transparent = transparent; material.needsUpdate = true; }
+  material.depthWrite = !transparent;
+  material.opacity = opacity;
 }
 
 function buildSurface() {
@@ -278,18 +318,17 @@ function buildSurface() {
 
 function applyVisuals() {
   const sphOp = +$('sphOp').value, pcOp = +$('pcOp').value, surfOp = +$('surfOp').value;
-  if (groups.spheres) { groups.spheres.material.opacity = sphOp; groups.spheres.visible = sphOp > 0; }
+  if (groups.spheres) { setOpacity(groups.spheres.material, sphOp); groups.spheres.visible = sphOp > 0; }
   if (groups.centers) groups.centers.visible = $('centers').checked;
   if (groups.contour) {
-    groups.contour.material.opacity = pcOp;
-    groups.contour.material.depthWrite = pcOp >= 0.99;
+    setOpacity(groups.contour.material, pcOp);
     groups.contour.visible = pcOp > 0;
+    groups.contour.userData.lastView = null; // force a re-sort
   }
-  if (groups.edges) { groups.edges.visible = $('pcEdges').checked; groups.edges.material.opacity = Math.max(pcOp, 0.35);
-    groups.edges.material.color.set(pcOp > 0 ? 0x222222 : COL_PC); }
+  if (groups.edges) { groups.edges.visible = $('pcEdges').checked; groups.edges.material.color.set(pcOp > 0 ? 0x222222 : COL_PC); }
   if (groups.surface) {
     groups.surface.visible = surfOp > 0;
-    groups.surface.children.forEach(m => { m.material.opacity = surfOp; });
+    groups.surface.children.forEach(m => setOpacity(m.material, surfOp));
   }
   bboxHelper.visible = $('bbox').checked;
   clipPlane.constant = +$('sliceZ').value;
@@ -323,7 +362,12 @@ function resize() {
 window.addEventListener('resize', resize);
 resize();
 compute();
-renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+renderer.setAnimationLoop(() => {
+  controls.update();
+  camera.updateMatrixWorld(); // so sortContour sees this frame's view matrix
+  sortContour();
+  renderer.render(scene, camera);
+});
 </script>
 </body>
 </html>

@@ -50,7 +50,13 @@ Cost: O(n²) plane tests overall, which takes about 0.3 s for 1200 sites in Node
   - `contour`: one triangle-fan `BufferGeometry` with per-vertex color, built by `buildContour`. Each face is emitted once, from its `+` side.
   - `edges`: `LineSegments` of the face outlines.
   - `surface`: the overlay of the true surface.
-- **`applyVisuals()`** handles every display-only control: opacities, visibility, the slice plane and the slider readouts. These controls never recompute the diagram. Contour `depthWrite` is on only when its opacity is ≥ 0.99, and `polygonOffset` keeps the edges drawn on top.
+- **`applyVisuals()`** handles every display-only control: opacities, visibility, the slice plane and the slider readouts. These controls never recompute the diagram.
+- **Transparency and depth order:**
+  - `setOpacity` makes a material opaque, writing depth, when its opacity is ≥ 0.99. Otherwise the material is blended and does not write depth.
+  - **Contour triangles** are sorted back to front by `sortContour()`. It runs from the render loop whenever the view matrix changes. Triangles share no vertices, so only the index buffer is permuted.
+  - The contour material uses `forceSinglePass`. Otherwise three.js draws transparent DoubleSide meshes as all back faces, then all front faces, which undoes the sort.
+  - **Edges** are opaque and write depth. A transparent contour therefore covers edges behind it, and edges in front of it stay crisp; the contour's `polygonOffset` resolves edges that lie on the contour itself.
+  - **Draw order** for transparent objects: spheres (`renderOrder` 1), then the contour (2), then the true surface (3). The order *between* these objects, and among the sphere instances, is not sorted by depth. See the open git-bug issue.
 - **Colors:** `+` is red, `−` is blue, the contour is gold. Faces touching a tangent site turn green when the tint option is on.
 
 ## Testing and conventions
