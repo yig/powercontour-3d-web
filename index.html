@@ -86,6 +86,8 @@
     </select></div>
   <div id="clipOpts">
     <div class="row"><label>Parallel (°)</label><input type="range" id="cParallel" min="0" max="45" step="1" value="10"><span class="val" id="cParallel-v"></span></div>
+    <label class="check"><input type="checkbox" id="cUnion" checked> Concave neighbors: union, not intersection</label>
+    <label class="check"><input type="checkbox" id="cMutual" checked> Convex only if mutually below</label>
     <label class="check"><input type="checkbox" id="cRing2All"> Clip all faces by two-ring</label>
     <label class="check"><input type="checkbox" id="cFeatures"> Detect curved creases (thresholds):</label>
     <div class="row"><label>Similar (°)</label><input type="range" id="cSimilar" min="1" max="60" step="1" value="20"><span class="val" id="cSimilar-v"></span></div>
@@ -207,7 +209,8 @@ function disposeGroup(obj) {
 // The clip options only re-clip; the diagrams are not recomputed.
 const clipOpts = () => ({ parallelDeg: +$('cParallel').value, features: $('cFeatures').checked, similarDeg: +$('cSimilar').value,
   turnFactor: +$('cTurn').value, marginDeg: +$('cMargin').value, onPlaneFactor: +$('cOnPlane').value,
-  ring2: $('cRing2').checked, ring2All: $('cRing2All').checked, splitFeature: $('cSplit').checked });
+  ring2: $('cRing2').checked, ring2All: $('cRing2All').checked, splitFeature: $('cSplit').checked,
+  concaveUnion: $('cUnion').checked, mutualConvex: $('cMutual').checked });
 const clipPlanesNow = () => ({ clip: true, ...Recover.clipTangentPlanes(data.planes, data.nbrs, clipOpts()) });
 
 function compute() {
@@ -531,7 +534,7 @@ function updateStats() {
 for (const id of ['shape', 'sampling', 'seed', 'sampled', 'tangent', 'mirrored', 'recMethod']) $(id).addEventListener('change', compute);
 const reclip = () => { if (data.recovered?.clip) { data.recovered = clipPlanesNow(); buildRecovered(); updateStats(); } applyVisuals(); };
 for (const id of ['cParallel', 'cSimilar', 'cTurn', 'cMargin', 'cOnPlane']) $(id).addEventListener('input', reclip);
-for (const id of ['cFeatures', 'cRing2', 'cRing2All', 'cSplit']) $(id).addEventListener('change', reclip);
+for (const id of ['cFeatures', 'cRing2', 'cRing2All', 'cSplit', 'cUnion', 'cMutual']) $(id).addEventListener('change', reclip);
 $('npts').addEventListener('input', applyVisuals);
 $('npts').addEventListener('change', compute);
 for (const id of ['sphOp', 'pcOp', 'surfOp', 'sliceZ']) $(id).addEventListener('input', applyVisuals);

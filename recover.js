@@ -271,10 +271,11 @@
   // tie, t_i exactly on P_j, then falls back to the samples' signs); similarDeg, turnFactor, marginDeg,
   // onPlaneFactor (featureTies); ring2 (clip feature points, or all points if ring2All, by their
   // two-ring); splitFeature (split two points on the same feature, or exactly on each other's
-  // planes, by their Voronoi bisector).
+  // planes, by their Voronoi bisector); concaveUnion (combine concave constraints by union);
+  // mutualConvex (convex only if each point is below the other's plane).
   // "Exactly on a plane", up to rounding: tangent points and normals are exact (shapes.js closest).
   const EXACT = 1e-12;
-  const CLIP_DEFAULTS = { parallelDeg: 10, features: false, similarDeg: 20, turnFactor: 3, marginDeg: 10, onPlaneFactor: 1, ring2: true, ring2All: false, splitFeature: true };
+  const CLIP_DEFAULTS = { parallelDeg: 10, features: false, similarDeg: 20, turnFactor: 3, marginDeg: 10, onPlaneFactor: 1, ring2: true, ring2All: false, splitFeature: true, concaveUnion: true, mutualConvex: true };
   function clipTangentPlanes(planes, nbrs, opts) {
     const o = { ...CLIP_DEFAULTS, ...opts };
     const cosPar = Math.cos(o.parallelDeg * Math.PI / 180), polys = [];
@@ -296,6 +297,7 @@
       for (const j of N) R = Math.max(R, Math.sqrt(dist2(t, planes.get(j).point)));
       R = 2 * R + 1e-6;
       let poly = [[-R, -R], [R, -R], [R, R], [-R, R]]; // 2D coordinates (along u, w) about t
+      const concave = []; // half-planes from concave pairs, combined by union (see below)
       for (const j of N) {
         const { point: tj, normal: nj, d: dj } = planes.get(j);
         const dv = [tj[0] - t[0], tj[1] - t[1], tj[2] - t[2]], dd = Math.hypot(dv[0], dv[1], dv[2]);
@@ -311,19 +313,31 @@
           // On a feature, the feature point's sample tells convex (outside) from concave (inside).
           const iOn = tie(i, j), jOn = tie(j, i);
           if (Math.abs(fji) <= EXACT) feature = true; // exactly on a neighbor's plane: corner or edge point
-          const convex = iOn ? d > 0 : jOn ? dj > 0 : Math.abs(fji) > EXACT ? fji < 0 : d + dj > 0;
+          // Convex only if each point is below the other's plane. A mixed pair (one below, one above,
+          // e.g. across a concave crease from far away) cannot be trusted to cut, so like a concave pair it
+          // only contributes to the union.
+          const fij = n[0] * dv[0] + n[1] * dv[1] + n[2] * dv[2]; // f_i(t_j) = n_i·(t_j − t_i)
+          const convex = iOn ? d > 0 : jOn ? dj > 0
+            : Math.abs(fji) > EXACT ? fji < 0 && (!o.mutualConvex || fij < EXACT) : d + dj > 0;
           // Two points on the same edge (or corner) have planes through the same line, which never
           // separate them along it; split them by their Voronoi bisector too.
           const exactMutual = Math.abs(fji) <= EXACT && Math.abs(n[0] * dv[0] + n[1] * dv[1] + n[2] * dv[2]) <= EXACT;
           if (o.splitFeature && ((iOn && jOn) || exactMutual) && dd > 1e-9) poly = clip2(poly, 2 * (dv[0] * u[0] + dv[1] * u[1] + dv[2] * u[2]), 2 * (dv[0] * w[0] + dv[1] * w[1] + dv[2] * w[2]), dd * dd);
           const sg = convex ? 1 : -1; // keep sg · f_j(x) ≤ 0, with x = t + p0 u + p1 w
-          poly = clip2(poly, sg * (nj[0] * u[0] + nj[1] * u[1] + nj[2] * u[2]), sg * (nj[0] * w[0] + nj[1] * w[1] + nj[2] * w[2]), -sg * fji);
+          const hp = [sg * (nj[0] * u[0] + nj[1] * u[1] + nj[2] * u[2]), sg * (nj[0] * w[0] + nj[1] * w[1] + nj[2] * w[2]), -sg * fji];
+          if (convex || !o.concaveUnion) poly = clip2(poly, ...hp);
+          else concave.push(hp);
         }
         if (poly.length < 3) break;
       }
-      if (poly.length < 3) { nEmpty++; if (feature) nEmptyFeature++; continue; }
-      polys.push({ owner: i, normal: n, feature,
-        pts: poly.map(([p, q]) => [t[0] + p * u[0] + q * w[0], t[1] + p * u[1] + q * w[1], t[2] + p * u[2] + q * w[2]]) });
+      // Across a concave crease the surface is min(max(planes on one side), max(planes on the
+      // other)): face i must be above at least ONE plane from the other side, not all of them.
+      // So concave constraints combine by union: the face is the pieces C ∩ H_j, which overlap.
+      const pieces = poly.length < 3 ? [] : !concave.length ? [poly]
+        : concave.map(hp => clip2(poly, ...hp)).filter(q => q.length >= 3);
+      if (!pieces.length) { nEmpty++; if (feature) nEmptyFeature++; continue; }
+      for (const piece of pieces) polys.push({ owner: i, normal: n, feature,
+        pts: piece.map(([p, q]) => [t[0] + p * u[0] + q * w[0], t[1] + p * u[1] + q * w[1], t[2] + p * u[2] + q * w[2]]) });
     }
     return { polys, nEmpty, nEmptyFeature };
   }
