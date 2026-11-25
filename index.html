@@ -55,7 +55,8 @@
     </select></div>
   <div class="row"><label>Points</label><input type="range" id="npts" min="10" max="1500" step="10" value="300"><span class="val" id="npts-v"></span></div>
   <div class="row"><label>Seed</label><input type="number" id="seed" value="1"></div>
-  <label class="check"><input type="checkbox" id="tangent"> Add tangent points</label>
+  <label class="check"><input type="checkbox" id="sampled" checked> Sampled points</label>
+  <label class="check"><input type="checkbox" id="tangent"> Tangent points</label>
 
   <h2>Input spheres</h2>
   <div class="row"><label>Opacity</label><input type="range" id="sphOp" min="0" max="1" step="0.01" value="0.15"><span class="val" id="sphOp-v"></span></div>
@@ -182,9 +183,11 @@ function compute() {
   const shape = shapes[$('shape').value];
   const inputs = samplePoints(+$('npts').value, $('sampling').value, +$('seed').value | 0);
   const sites = [], weights = [], signs = [], isTangent = [];
-  for (const p of inputs) {
-    const d = shape.sdf(p);
-    sites.push(p); weights.push(d * d); signs.push(d >= 0 ? 1 : -1); isTangent.push(false);
+  if ($('sampled').checked) {
+    for (const p of inputs) {
+      const d = shape.sdf(p);
+      sites.push(p); weights.push(d * d); signs.push(d >= 0 ? 1 : -1); isTangent.push(false);
+    }
   }
   if ($('tangent').checked) {
     for (const p of inputs) {
@@ -198,7 +201,7 @@ function compute() {
   const t0 = performance.now();
   const cells = PowerDiagram.computePowerDiagram(sites, weights, [-B, -B, -B], [B, B, B]);
   const ms = performance.now() - t0;
-  data = { sites, weights, signs, isTangent, cells, ms, nInputs: inputs.length };
+  data = { sites, weights, signs, isTangent, cells, ms };
   rebuildAll();
 }
 
@@ -406,17 +409,17 @@ function applyVisuals() {
 }
 
 function updateStats() {
-  const nt = data.isTangent.filter(Boolean).length;
+  const nt = data.isTangent.filter(Boolean).length, ns = data.sites.length - nt;
   const empty = data.cells.filter(c => c.length === 0).length;
   $('stats').textContent =
-    `${data.nInputs} input + ${nt} tangent sites\n` +
+    `${ns} sampled + ${nt} tangent sites\n` +
     `${empty} empty power cells\n` +
     `${data.nFaces} contour faces, area ${data.area.toFixed(3)}\n` +
     `power diagram: ${data.ms.toFixed(0)} ms`;
 }
 
 // ---------- UI wiring ----------
-for (const id of ['shape', 'sampling', 'seed', 'tangent']) $(id).addEventListener('change', compute);
+for (const id of ['shape', 'sampling', 'seed', 'sampled', 'tangent']) $(id).addEventListener('change', compute);
 $('npts').addEventListener('input', applyVisuals);
 $('npts').addEventListener('change', compute);
 for (const id of ['sphOp', 'pcOp', 'surfOp', 'sliceZ']) $(id).addEventListener('input', applyVisuals);

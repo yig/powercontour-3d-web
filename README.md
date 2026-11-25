@@ -6,7 +6,7 @@ An interactive 3D viewer for the *power contour* of points sampling a signed dis
 
 Each sample point `p` with SDF value `d` becomes a weighted site: a sphere of radius `|d|`, signed by `d`. The viewer computes the power diagram of these sites, clipped to the box `[−1.5, 1.5]³`. The **power contour** is the set of faces between a positive cell and a negative cell, and it approximates the zero level set.
 
-You can also add one **tangent point** per sample: the closest point on the surface, with weight 0 and the opposite sign. This pulls the contour much closer to the true surface.
+You can also add one **tangent point** per sample: the closest point on the surface, with weight 0 and the opposite sign. This pulls the contour much closer to the true surface. The sampled points and the tangent points can each be switched on or off, so you can also look at the diagram of the tangent points alone.
 
 ## Running
 
@@ -18,10 +18,10 @@ There is no build step and no network access needed. Open `index.html` directly 
 |---|---|---|
 | Input | Shape | Sphere, box, torus, or a union of two spheres |
 | | Sampling, Points, Seed | Uniform random, jittered grid, or regular grid; number of samples; random seed |
-| | Add tangent points | Adds one tangent point per sample |
+| | Sampled points, Tangent points | Which sites go into the power diagram: the samples, their tangent points, or both |
 | Input spheres | Opacity, Show centers | Transparency of the `\|d\|` spheres (0 hides them); dots at the site positions |
 | Power contour | Opacity, Show edges | Transparency of the contour; face outlines on or off |
-| | Tint faces touching tangent points | Draws those faces in green |
+| | Tint faces touching tangent points | Draws those faces in green. With both kinds of sites on, almost every face is green: each tangent point lies on its own sample's sphere and outside the others, so tangent cells separate most `+` samples from `−` samples |
 | Reference | True surface | Opacity of the exact surface (0 hides it) |
 | | Slice, Slice z | Hides everything above a horizontal plane, so you can see inside |
 | | Show bounding box | Outline of the domain |

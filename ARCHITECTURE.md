@@ -18,8 +18,8 @@ Everything is loaded as classic `<script>` tags, because browsers refuse to load
 
 - Each site `i` has a position `p_i`, a weight `w_i` and a sign `s_i ∈ {+1, −1}`.
 - The power distance is `pow_i(x) = |x − p_i|² − w_i`. The cell of `i` is where `pow_i` is the smallest.
-- **Input sites** are sample points `p` with SDF value `d`. They get `w = d²`, so each is a sphere of radius `|d|`, and sign `s = sign(d)` (zero counts as +).
-- **Tangent sites** are optional, one per input site with `d ≠ 0`. Each sits at `p − d·∇d`, the closest point on the surface; `∇d` is found by central differences and normalized. It gets `w = 0` and the opposite sign, `−sign(d)`.
+- **Input sites** ("Sampled points", on by default) are sample points `p` with SDF value `d`. They get `w = d²`, so each is a sphere of radius `|d|`, and sign `s = sign(d)` (zero counts as +).
+- **Tangent sites** ("Tangent points", off by default) are one per sample point with `d ≠ 0`, computed whether or not the input sites are included. Each sits at `p − d·∇d`, the closest point on the surface; `∇d` is found by central differences and normalized. It gets `w = 0` and the opposite sign, `−sign(d)`. A tangent site lies on its own sample's sphere (power 0 for both) and, for an exact SDF, outside every other sphere. So when both kinds are on, tangent cells sit between almost all `+` and `−` input cells, and nearly every contour face touches a tangent site (e.g. torus, 300 random samples: 26 of 1709 faces are input–input).
 - The **power contour** is every cell face shared by a `+` cell and a `−` cell. Faces on the bounding box are not part of it.
 
 ## Power diagram (`powerdiagram.js`)
@@ -43,7 +43,7 @@ Cost: O(n²) plane tests overall, which takes about 0.3 s for 1200 sites in Node
 - **Domain** is `[−B, B]³` with `B = 1.5`, used both for sampling and for the diagram's bounding box.
 - **`shapes`** maps a name to `{ sdf(p), meshes() }`. `meshes()` returns three.js geometry for the optional true-surface overlay. To add a shape, add one entry here and one `<option>`.
 - **Sampling** (`samplePoints`) is uniform random, jittered grid or regular grid, using the seeded PRNG `mulberry32`. The regular grid gets a jitter of about 1e-6 to avoid degenerate cases.
-- **Pipeline:** `compute()` samples points, builds the sites, runs `computePowerDiagram`, stores everything in `data`, then calls `rebuildAll()`. Changing shape, sampling, point count, seed or the tangent checkbox recomputes.
+- **Pipeline:** `compute()` samples points, builds the sites, runs `computePowerDiagram`, stores everything in `data`, then calls `rebuildAll()`. Changing shape, sampling, point count, seed or either site checkbox recomputes. With both off there are no sites and nothing is drawn.
 - **Scene objects** (in `groups`):
   - `merged`: one `Mesh` holding **both** the input spheres (radius `√w`; tangent sites have radius 0 and are skipped) and the contour faces, built by `buildTransparent`. Each face is emitted once, from its `+` side. Each object (one sphere, or one contour face) owns a contiguous range of unshared vertices. The color attribute is RGBA: its alpha is the sphere or contour opacity, written by `applyVisuals`. A `cullBack` vertex attribute, used by a shader patch in `onBeforeCompile`, hides the back faces of spheres only; the contour stays two-sided.
   - `centers`: small opaque instanced dots; tangent sites are drawn smaller and lighter.
