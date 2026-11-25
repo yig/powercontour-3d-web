@@ -22,6 +22,7 @@
     border-radius: 4px; padding: 2px 4px; min-width: 0; }
   button { background: #3b6ea8; color: white; border: 0; border-radius: 4px; padding: 5px 10px; cursor: pointer; }
   button:hover { background: #4a80bd; }
+  #faceLegend { font-size: 12px; line-height: 1.6; }
   #stats { margin-top: 10px; color: #9aa0ab; font-size: 12px; white-space: pre-line; }
   .legend { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; }
 </style>
@@ -65,7 +66,12 @@
   <h2>Power contour</h2>
   <div class="row"><label>Opacity</label><input type="range" id="pcOp" min="0" max="1" step="0.01" value="0.85"><span class="val" id="pcOp-v"></span></div>
   <label class="check"><input type="checkbox" id="pcEdges" checked> Show edges</label>
-  <label class="check"><input type="checkbox" id="pcTangentColor"> Tint faces touching tangent points</label>
+  <div class="row"><label>Face color</label>
+    <select id="pcColorBy">
+      <option value="uniform">Uniform</option>
+      <option value="type">By face type</option>
+    </select></div>
+  <div id="faceLegend"></div>
 
   <h2>Reference</h2>
   <div class="row"><label>True surface</label><input type="range" id="surfOp" min="0" max="1" step="0.01" value="0"><span class="val" id="surfOp-v"></span></div>
@@ -168,10 +174,18 @@ const bboxHelper = new THREE.Box3Helper(new THREE.Box3(new THREE.Vector3(-B, -B,
 scene.add(bboxHelper);
 
 const COL_POS = new THREE.Color(0xe0685a), COL_NEG = new THREE.Color(0x5a8fe0);
-const COL_PC = new THREE.Color(0xf0c040), COL_PC_T = new THREE.Color(0x60d0a0);
+const COL_PC = new THREE.Color(0xf0c040);
+// Contour faces by the kinds of the two sites they separate (the "By face type" coloring).
+// Only an OWN face (a sample and its own tangent point) contains the tangent point.
+const FACE_TYPES = [
+  { key: 'ss', label: 'sample – sample', color: COL_PC },
+  { key: 'own', label: 'sample – own tangent', color: new THREE.Color(0x60d0a0) },
+  { key: 'other', label: 'sample – other tangent', color: new THREE.Color(0xb080e0) },
+  { key: 'tt', label: 'tangent – tangent', color: new THREE.Color(0xe0e0e0) },
+];
 
 let groups = { merged: null, centers: null, edges: null, surface: null };
-let data = null; // { sites, weights, signs, isTangent, cells }
+let data = null; // { sites, weights, signs, isTangent, owner, cells }
 
 function disposeGroup(obj) {
   if (!obj) return;
@@ -182,26 +196,26 @@ function disposeGroup(obj) {
 function compute() {
   const shape = shapes[$('shape').value];
   const inputs = samplePoints(+$('npts').value, $('sampling').value, +$('seed').value | 0);
-  const sites = [], weights = [], signs = [], isTangent = [];
+  const sites = [], weights = [], signs = [], isTangent = [], owner = []; // owner: index of the sample a site comes from
   if ($('sampled').checked) {
-    for (const p of inputs) {
+    inputs.forEach((p, k) => {
       const d = shape.sdf(p);
-      sites.push(p); weights.push(d * d); signs.push(d >= 0 ? 1 : -1); isTangent.push(false);
-    }
+      sites.push(p); weights.push(d * d); signs.push(d >= 0 ? 1 : -1); isTangent.push(false); owner.push(k);
+    });
   }
   if ($('tangent').checked) {
-    for (const p of inputs) {
+    inputs.forEach((p, k) => {
       const d = shape.sdf(p);
-      if (Math.abs(d) < 1e-9) continue; // already on the surface
+      if (Math.abs(d) < 1e-9) return; // already on the surface
       const g = gradient(shape.sdf, p);
       sites.push([p[0] - d * g[0], p[1] - d * g[1], p[2] - d * g[2]]);
-      weights.push(0); signs.push(d >= 0 ? -1 : 1); isTangent.push(true);
-    }
+      weights.push(0); signs.push(d >= 0 ? -1 : 1); isTangent.push(true); owner.push(k);
+    });
   }
   const t0 = performance.now();
   const cells = PowerDiagram.computePowerDiagram(sites, weights, [-B, -B, -B], [B, B, B]);
   const ms = performance.now() - t0;
-  data = { sites, weights, signs, isTangent, cells, ms };
+  data = { sites, weights, signs, isTangent, owner, cells, ms };
   rebuildAll();
 }
 
@@ -233,8 +247,10 @@ const SPHERE_TEMPLATE = new THREE.SphereGeometry(1, 20, 12).toNonIndexed();
 
 function buildTransparent() {
   disposeGroup(groups.merged); disposeGroup(groups.edges);
-  const { sites, weights, signs, isTangent, cells } = data;
-  const tint = $('pcTangentColor').checked;
+  const { sites, weights, signs, isTangent, owner, cells } = data;
+  const byType = $('pcColorBy').value === 'type';
+  const faceType = (i, j) => isTangent[i] && isTangent[j] ? 3 : !isTangent[i] && !isTangent[j] ? 0 : owner[i] === owner[j] ? 1 : 2;
+  const typeCount = FACE_TYPES.map(() => 0);
   const tp = SPHERE_TEMPLATE.attributes.position.array, tn = SPHERE_TEMPLATE.attributes.normal.array;
   const tv = tp.length / 3;
 
@@ -269,7 +285,9 @@ function buildTransparent() {
   faces.forEach((f, fi) => {
     const o = nSph + fi, vs = f.verts;
     start[o] = v; siteA[o] = f.i; siteB[o] = f.j;
-    const c = tint && (isTangent[f.i] || isTangent[f.j]) ? COL_PC_T : COL_PC;
+    const type = faceType(f.i, f.j);
+    typeCount[type]++;
+    const c = byType ? FACE_TYPES[type].color : COL_PC;
     // Newell normal (DoubleSide lighting flips it for back faces).
     const n = [0, 0, 0];
     for (let k = 0; k < vs.length; k++) {
@@ -318,6 +336,8 @@ function buildTransparent() {
   groups.edges = new THREE.LineSegments(eg, new THREE.LineBasicMaterial({ color: 0x222222, clippingPlanes: clipPlanes() }));
   scene.add(groups.merged, groups.edges);
   data.nFaces = faces.length; data.area = area;
+  $('faceLegend').innerHTML = byType ? FACE_TYPES.map((t, k) =>
+    `<span class="legend" style="background:#${t.color.getHexString()}"></span>${t.label}: ${typeCount[k]}`).join('<br>') : '';
   applyVisuals();
 }
 
@@ -424,7 +444,7 @@ $('npts').addEventListener('input', applyVisuals);
 $('npts').addEventListener('change', compute);
 for (const id of ['sphOp', 'pcOp', 'surfOp', 'sliceZ']) $(id).addEventListener('input', applyVisuals);
 for (const id of ['centers', 'pcEdges', 'slice', 'bbox']) $(id).addEventListener('change', applyVisuals);
-$('pcTangentColor').addEventListener('change', buildTransparent);
+$('pcColorBy').addEventListener('change', buildTransparent);
 
 function resize() {
   const w = window.innerWidth, h = window.innerHeight;

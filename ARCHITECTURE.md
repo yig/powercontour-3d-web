@@ -19,7 +19,7 @@ Everything is loaded as classic `<script>` tags, because browsers refuse to load
 - Each site `i` has a position `p_i`, a weight `w_i` and a sign `s_i ∈ {+1, −1}`.
 - The power distance is `pow_i(x) = |x − p_i|² − w_i`. The cell of `i` is where `pow_i` is the smallest.
 - **Input sites** ("Sampled points", on by default) are sample points `p` with SDF value `d`. They get `w = d²`, so each is a sphere of radius `|d|`, and sign `s = sign(d)` (zero counts as +).
-- **Tangent sites** ("Tangent points", off by default) are one per sample point with `d ≠ 0`, computed whether or not the input sites are included. Each sits at `p − d·∇d`, the closest point on the surface; `∇d` is found by central differences and normalized. It gets `w = 0` and the opposite sign, `−sign(d)`. A tangent site lies on its own sample's sphere (power 0 for both) and, for an exact SDF, outside every other sphere. So when both kinds are on, tangent cells sit between almost all `+` and `−` input cells, and nearly every contour face touches a tangent site (e.g. torus, 300 random samples: 26 of 1709 faces are input–input).
+- **Tangent sites** ("Tangent points", off by default) are one per sample point with `d ≠ 0`, computed whether or not the input sites are included. Each sits at `p − d·∇d`, the closest point on the surface; `∇d` is found by central differences and normalized. It gets `w = 0` and the opposite sign, `−sign(d)`. A tangent site lies on its own sample's sphere (power 0 for both) and, for an exact SDF, outside every other sphere. So when both kinds are on, tangent cells sit between almost all `+` and `−` input cells. A face between a sample and its **own** tangent site contains that tangent site. A face between a sample and **another** sample's tangent site, or between two tangent sites, is only a wall of the tangent cell and is usually far from the tangent point. Torus, 300 random samples: 26 sample–sample, 300 own, 1364 other, 19 tangent–tangent faces.
 - The **power contour** is every cell face shared by a `+` cell and a `−` cell. Faces on the bounding box are not part of it.
 
 ## Power diagram (`powerdiagram.js`)
@@ -58,7 +58,7 @@ Cost: O(n²) plane tests overall, which takes about 0.3 s for 1200 sites in Node
   - `forceSinglePass` is needed: otherwise three.js draws transparent DoubleSide meshes as all back faces, then all front faces, which breaks the order. `depthWrite` is off unless everything drawn is fully opaque.
   - **Edges** are opaque and write depth. The transparent mesh therefore covers edges behind it, and edges in front of it stay crisp; `polygonOffset` resolves edges that lie on the contour itself.
   - The true-surface overlay is a separate transparent object drawn after `merged` (`renderOrder` 2), so it is not sorted with it.
-- **Colors:** `+` is red, `−` is blue, the contour is gold. Faces touching a tangent site turn green when the tint option is on.
+- **Colors:** `+` is red, `−` is blue, the contour is gold. With *Face color: By face type*, `buildTransparent` classifies each face with `faceType` (using `data.owner`, the sample index each site comes from) and colors it from `FACE_TYPES`. It also fills the `#faceLegend` legend with counts.
 
 ## Testing and conventions
 

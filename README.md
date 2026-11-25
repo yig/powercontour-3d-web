@@ -21,7 +21,7 @@ There is no build step and no network access needed. Open `index.html` directly 
 | | Sampled points, Tangent points | Which sites go into the power diagram: the samples, their tangent points, or both |
 | Input spheres | Opacity, Show centers | Transparency of the `\|d\|` spheres (0 hides them); dots at the site positions |
 | Power contour | Opacity, Show edges | Transparency of the contour; face outlines on or off |
-| | Tint faces touching tangent points | Draws those faces in green. With both kinds of sites on, almost every face is green: each tangent point lies on its own sample's sphere and outside the others, so tangent cells separate most `+` samples from `−` samples |
+| | Face color | *Uniform* (gold), or *By face type*: colors each face by the two sites it separates, with a legend and counts. The types are sample–sample (gold), sample–own tangent (green), sample–other tangent (purple) and tangent–tangent (white). Only a green face contains its tangent point; the others are walls of a tangent cell, often far from the point |
 | Reference | True surface | Opacity of the exact surface (0 hides it) |
 | | Slice, Slice z | Hides everything above a horizontal plane, so you can see inside |
 | | Show bounding box | Outline of the domain |
