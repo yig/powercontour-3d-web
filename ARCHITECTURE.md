@@ -9,6 +9,7 @@ Everything is loaded as classic `<script>` tags, because browsers refuse to load
 | File | Role |
 |---|---|
 | `powerdiagram.js` | Pure geometry: the 3D power diagram. No three.js. Runs in the browser (global `PowerDiagram`) and in Node (`require`). |
+| `recover.js` | Pure geometry: recovers a surface by intersecting tangent planes, using the power contour's connectivity. No three.js. Browser global `Recover`, Node `require`. |
 | `index.html` | UI and rendering: SDFs, sampling, building sites, three.js scene, controls. All code is in one inline `<script type="module">`, which uses the global `THREE`. |
 | `vendor/three.js`, `vendor/OrbitControls.js` | three.js r170, converted from its ES modules into classic scripts that define `window.THREE` and `THREE.OrbitControls`. Generated; do not edit. |
 | `vendor/update-three.mjs` | Regenerates the files above from jsdelivr: `node vendor/update-three.mjs [version]`. It stops with an error if a three.js version no longer has the single-file, import-free form it expects. |
@@ -38,17 +39,37 @@ Everything is loaded as classic `<script>` tags, because browsers refuse to load
 
 Cost: O(n²) plane tests overall, which takes about 0.3 s for 1200 sites in Node. Each face is stored in both of its cells, without shared vertices.
 
+## Surface recovery (`recover.js`)
+
+`recoverSurface(sites, signs, owner, cells, planes, lambda)` builds a polygon mesh with one face per sample, lying in that sample's tangent plane. The power contour supplies the connectivity.
+
+- **Why the planes:** the face between sample `p_i` and its own tangent site `t_i` lies in the radical plane of sphere `i` and the point `t_i`. Since `t_i` is on that sphere, this is the sphere's tangent plane at `t_i`, which for an exact SDF is the surface's tangent plane. The face always exists and contains `t_i`: there both sites have power 0, and every other site has positive power.
+- **Owners:** every site has an owner, the sample it comes from (`data.owner`). Green faces (own faces) never meet three at a vertex, so they cannot give plane intersections by themselves; the other contour faces fill the gaps between them.
+- **Algorithm:**
+  1. Weld the contour vertices (each cell computes its own copy) and partition the contour faces into one *region* per owner. A green face belongs to its owner. Any other face belongs to whichever of its two owners has the nearer tangent point (measured from the face centroid).
+  2. Clean up so that every region is one connected piece: a stray component cut off from the region's green face goes to the face's other owner, or else to its most common neighboring region. A region enclosed by a single other region is merged into it. (Without this, about 1% of regions are not discs.)
+  3. Output vertices are the contour vertices where ≥ 3 regions meet. Each is placed by least squares on the tangent planes of those regions, `Σ (n_k·(x − t_k))² + λ|x − v|²`, where `v` is the contour vertex. `λ` (`REC_LAMBDA = 0.01`) keeps nearly parallel planes well-posed.
+  4. Each region's polygon is its boundary loop on the contour (a chain of half-edges whose twin is in another region), keeping only the output vertices on it. A region whose boundary is not a single simple loop, or that has fewer than 3 output vertices, is reported in `badOwners` and leaves a hole.
+- **Why a partition:** an earlier version gave every non-green face to *both* of its owners. Regions then overlap, and on the torus or box an owner pair could share 3 to 20 vertices instead of 2, so there was no valid mesh.
+- **Results**, 1500 samples, `|sdf|` at the vertices:
+  - Box: about 10× more accurate than the contour vertices; edges and corners come out sharp.
+  - Torus: closed mesh (χ = 0), no gain in accuracy.
+  - Two spheres, "Near surface" sampling: crease vertices are 0.008 from the crease circle (median), against 0.05 for the contour.
+- **Requires** both sampled and tangent points.
+
 ## Viewer (`index.html`)
 
 - **Domain** is `[−B, B]³` with `B = 1.5`, used both for sampling and for the diagram's bounding box.
 - **`shapes`** maps a name to `{ sdf(p), meshes() }`. `meshes()` returns three.js geometry for the optional true-surface overlay. To add a shape, add one entry here and one `<option>`.
-- **Sampling** (`samplePoints`) is uniform random, jittered grid or regular grid, using the seeded PRNG `mulberry32`. The regular grid gets a jitter of about 1e-6 to avoid degenerate cases.
+- **Sampling** (`samplePoints`) is uniform random, jittered grid, regular grid, or near surface (uniform random, keeping points with `|d| < BAND = 0.1`), using the seeded PRNG `mulberry32`. The regular grid gets a jitter of about 1e-6 to avoid degenerate cases. Near-surface sampling puts the point budget where the surface is; the two-sphere crease is only recovered well with it.
+- **Two-sphere SDF:** `min(dL, dR)` is exact outside the union but not inside. Inside, the nearest surface point may be on the crease circle, or on the exposed cap of a sphere, so the SDF computes those distances. With the plain `min`, tangent points of interior samples landed on sphere parts buried inside the other sphere.
 - **Pipeline:** `compute()` samples points, builds the sites, runs `computePowerDiagram`, stores everything in `data`, then calls `rebuildAll()`. Changing shape, sampling, point count, seed or either site checkbox recomputes. With both off there are no sites and nothing is drawn.
 - **Scene objects** (in `groups`):
   - `merged`: one `Mesh` holding **both** the input spheres (radius `√w`; tangent sites have radius 0 and are skipped) and the contour faces, built by `buildTransparent`. Each face is emitted once, from its `+` side. Each object (one sphere, or one contour face) owns a contiguous range of unshared vertices. The color attribute is RGBA: its alpha is the sphere or contour opacity, written by `applyVisuals`. A `cullBack` vertex attribute, used by a shader patch in `onBeforeCompile`, hides the back faces of spheres only; the contour stays two-sided.
   - `centers`: small opaque instanced dots; tangent sites are drawn smaller and lighter.
   - `edges`: `LineSegments` of the face outlines.
   - `surface`: the overlay of the true surface.
+  - `recovered`: the recovered surface (`buildRecovered`), when "Intersect tangent planes" is on. Opaque, so it is drawn before the transparent mesh, writes depth and needs no sorting. Its polygon outlines are dark; hole edges (a directed edge whose reverse is in no polygon) are red.
 - **`applyVisuals()`** handles every display-only control: opacities, visibility, the slice plane and the slider readouts. These controls never recompute the diagram.
 - **Transparency and depth order.** `sortTransparent()` runs from the render loop whenever the camera *position* changes, and permutes object ranges in `merged`'s index buffer so everything is drawn back to front:
   - The sort key is the eye's power distance to the sites, `π_k = |e − p_k|² − w_k`. Along any ray from the eye, power cells are crossed in increasing `π`. On the ray, each site's power distance minus the shared `t²` is a straight line in `t`; the ray is in the cell whose line is lowest, and lines become lowest in order of increasing value at `t = 0` (Edelsbrunner's acyclicity theorem).
