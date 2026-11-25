@@ -57,6 +57,15 @@ Cost: O(n²) plane tests overall, which takes about 0.3 s for 1200 sites in Node
   - Two spheres, "Near surface" sampling: crease vertices are 0.008 from the crease circle (median), against 0.05 for the contour.
 - **Requires** both sampled and tangent points.
 
+### Clipped tangent planes (`clipTangentPlanes`)
+
+The second method ("Clip tangent planes") uses only the tangent data (`t_i`, `n_i`, and the sign of each tangent point's sample) and works with the samples as given.
+
+- **Connectivity from mirrored pairs** (`mirroredSites`, `contourNeighbors`): each tangent point becomes two sites `t ± δn` (`δ = MIRROR_DELTA = 1e-3`, weight 0, signs + and −). Their bisector is exactly the tangent plane, and the pair's cells together are `t`'s Voronoi cell. So their power contour is each tangent plane clipped to its Voronoi cell, plus thin "step" faces on the Voronoi faces between neighbors where the planes do not meet: the zero set of Hoppe et al.'s nearest-tangent-plane distance. Tangent points whose pieces meet at a contour vertex are neighbors (a restricted Delaunay neighborhood). The "Mirrored pairs" site checkbox shows this contour.
+- **Faces:** each face is its tangent plane `P_i`, clipped by the half-spaces of its neighbors' planes (2D clipping in `P_i`). Keep the side of `P_j` containing `t_i` (`f_j ≤ 0` where the surface is locally convex, `f_j ≥ 0` where concave, `f_j(x) = n_j·(x − t_j)`). Neighbors whose normals are within `PARALLEL_DEG = 10°` are split by their Voronoi bisector instead.
+- **Features:** where samples on both sides share closest points (box corners and edges, the two-sphere crease) the tangent points carry supporting planes, not tangent planes. `featureTies` decides that `t_i` lies on a feature shared with neighbor `j` when their normals turn much faster than `j`'s patch curvature `κ_j` allows (`θ > 3κ_j r + 10°`) and `t_i` is no farther off `P_j` than that curvature explains (`|f_j(t_i)| ≤ κ_j r²`; exactly on it for flat patches). On a feature, the sample's sign decides: outside samples see a convex feature (keep `f_j ≤ 0`), inside samples a concave one. Feature points are clipped against their two-ring of neighbors, and two points on the same feature are also split by their Voronoi bisector. As a result, the faces of corner and edge points shrink to nothing or nearly nothing (box, 1500 random samples: 375 of 394 corner faces and 576 of 663 edge faces are empty), while their planes cut the flat faces exactly at the edges.
+- Faces share no vertices; the result is a polygon soup, not a mesh. Results (1500 samples, vertices with `|sdf| > 0.02`): sphere 0, torus 45–83 (sampling-limited), box 12–15, two spheres 9 with near-surface sampling.
+
 ## Viewer (`index.html`)
 
 - **Domain** is `[−B, B]³` with `B = 1.5`, used both for sampling and for the diagram's bounding box.
@@ -69,7 +78,7 @@ Cost: O(n²) plane tests overall, which takes about 0.3 s for 1200 sites in Node
   - `centers`: small opaque instanced dots; tangent sites are drawn smaller and lighter.
   - `edges`: `LineSegments` of the face outlines.
   - `surface`: the overlay of the true surface.
-  - `recovered`: the recovered surface (`buildRecovered`), when "Intersect tangent planes" is on. Opaque, so it is drawn before the transparent mesh, writes depth and needs no sorting. Its polygon outlines are dark; hole edges (a directed edge whose reverse is in no polygon) are red.
+  - `recovered`: the recovered surface (`buildRecovered`), for the method chosen under "Recovered surface". With "Clip tangent planes", faces of feature points are orange. Opaque, so it is drawn before the transparent mesh, writes depth and needs no sorting. Its polygon outlines are dark; hole edges (a directed edge whose reverse is in no polygon) are red.
 - **`applyVisuals()`** handles every display-only control: opacities, visibility, the slice plane and the slider readouts. These controls never recompute the diagram.
 - **Transparency and depth order.** `sortTransparent()` runs from the render loop whenever the camera *position* changes, and permutes object ranges in `merged`'s index buffer so everything is drawn back to front:
   - The sort key is the eye's power distance to the sites, `π_k = |e − p_k|² − w_k`. Along any ray from the eye, power cells are crossed in increasing `π`. On the ray, each site's power distance minus the shared `t²` is a straight line in `t`; the ray is in the cell whose line is lowest, and lines become lowest in order of increasing value at `t = 0` (Edelsbrunner's acyclicity theorem).

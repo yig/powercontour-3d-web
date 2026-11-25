@@ -10,7 +10,9 @@ You can also add one **tangent point** per sample: the closest point on the surf
 
 ## Recovered surface
 
-*Intersect tangent planes* builds a polygon mesh with one face per sample, lying in its tangent plane. The power contour supplies the connectivity. The face between a sample and its own tangent point lies in that tangent plane. Every other contour face is given to the nearer of its two samples, and the resulting regions on the contour become the faces of the new mesh. Each vertex is where three or more tangent planes meet, so sharp edges and corners (the box, the two-sphere crease) come out sharp. Red outlines mark holes, where a region is not a disc. See `ARCHITECTURE.md`.
+*Contract contour regions* builds a polygon mesh with one face per sample, lying in its tangent plane. The power contour supplies the connectivity. The face between a sample and its own tangent point lies in that tangent plane. Every other contour face is given to the nearer of its two samples, and the resulting regions on the contour become the faces of the new mesh. Each vertex is where three or more tangent planes meet, so sharp edges and corners (the box, the two-sphere crease) come out sharp. Red outlines mark holes, where a region is not a disc.
+
+*Clip tangent planes* uses only the tangent points: it finds neighbors with the power diagram of mirrored pairs `t ± δn` (check *Mirrored pairs* to see that contour), then clips each tangent plane by its neighbors' half-spaces. Tangent points on corners and creases get tiny faces (orange) and their planes cut the faces around them along the feature. See `ARCHITECTURE.md`.
 
 ## Running
 
@@ -22,11 +24,11 @@ There is no build step and no network access needed. Open `index.html` directly 
 |---|---|---|
 | Input | Shape | Sphere, box, torus, or a union of two spheres |
 | | Sampling, Points, Seed | Uniform random, jittered grid, regular grid, or near the surface (`\|d\| < 0.1`); number of samples; random seed |
-| | Sampled points, Tangent points | Which sites go into the power diagram: the samples, their tangent points, or both |
+| | Sampled points, Tangent points, Mirrored pairs | Which sites go into the power diagram: the samples, their tangent points, and/or a pair `t ± δn` per tangent point |
 | Input spheres | Opacity, Show centers | Transparency of the `\|d\|` spheres (0 hides them); dots at the site positions |
 | Power contour | Opacity, Show edges | Transparency of the contour; face outlines on or off |
 | | Face color | *Uniform* (gold), or *By face type*: colors each face by the two sites it separates, with a legend and counts. The types are sample–sample (gold), sample–own tangent (green), sample–other tangent (purple) and tangent–tangent (white). Only a green face contains its tangent point; the others are walls of a tangent cell, often far from the point |
-| Recovered surface | Intersect tangent planes | Shows the recovered surface (needs sampled and tangent points) |
+| Recovered surface | Method | *Contract contour regions* (needs sampled + tangent points only) or *Clip tangent planes* (any sites) |
 | Reference | True surface | Opacity of the exact surface (0 hides it) |
 | | Slice, Slice z | Hides everything above a horizontal plane, so you can see inside |
 | | Show bounding box | Outline of the domain |

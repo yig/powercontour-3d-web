@@ -178,7 +178,145 @@
     return { verts, anchors, vertOwners, polys, badOwners, nRegions: bnext.size };
   }
 
-  const api = { recoverSurface };
+  // ---------- Clipped tangent planes ----------
+  //
+  // Connectivity from MIRRORED PAIRS: each tangent point t (normal n) becomes two sites t + δn (+)
+  // and t − δn (−), weight 0. Their power contour is each tangent plane clipped to t's Voronoi cell,
+  // plus thin steps on the Voronoi faces between neighbors; tangent points whose pieces meet at a
+  // contour vertex are neighbors (the restricted Delaunay neighborhood). Only tangent data is used.
+  function mirroredSites(planes, delta) {
+    const sites = [], signs = [], owner = [];
+    for (const [k, { point: t, normal: n }] of planes) {
+      sites.push([t[0] + delta * n[0], t[1] + delta * n[1], t[2] + delta * n[2]]); signs.push(1); owner.push(k);
+      sites.push([t[0] - delta * n[0], t[1] - delta * n[1], t[2] - delta * n[2]]); signs.push(-1); owner.push(k);
+    }
+    return { sites, weights: sites.map(() => 0), signs, owner };
+  }
+
+  // Neighbors: owners that meet at some vertex of the power contour.
+  function contourNeighbors(signs, owner, cells) {
+    const welder = makeWelder(), vOwners = [];
+    cells.forEach((cf, i) => {
+      if (signs[i] <= 0) return;
+      for (const f of cf) {
+        const j = f.label;
+        if (j < 0 || signs[j] >= 0) continue;
+        for (const p of f.verts) {
+          const k = welder.id(p);
+          (vOwners[k] = vOwners[k] || new Set()).add(owner[i]).add(owner[j]);
+        }
+      }
+    });
+    const nbrs = new Map();
+    for (const os of vOwners) if (os) for (const a of os) for (const b of os) if (a !== b) {
+      if (!nbrs.has(a)) nbrs.set(a, new Set());
+      nbrs.get(a).add(b);
+    }
+    return nbrs;
+  }
+
+  // Clips a convex 2D polygon to { p : a·p ≤ b }.
+  function clip2(poly, a0, a1, b) {
+    const out = [];
+    for (let k = 0; k < poly.length; k++) {
+      const P = poly[k], Q = poly[(k + 1) % poly.length];
+      const sp = a0 * P[0] + a1 * P[1] - b, sq = a0 * Q[0] + a1 * Q[1] - b;
+      if (sp <= 0) out.push(P);
+      if ((sp < 0 && sq > 0) || (sp > 0 && sq < 0)) { const t = sp / (sp - sq); out.push([P[0] + t * (Q[0] - P[0]), P[1] + t * (Q[1] - P[1])]); }
+    }
+    return out;
+  }
+
+  // Face i = tangent plane P_i clipped by the half-spaces of its neighbors' tangent planes, keeping
+  // the side that contains t_i: f_j ≤ 0 if t_i is below P_j (locally convex: the max of the f's),
+  // f_j ≥ 0 if above (concave: the min). f_j(x) = n_j·(x − t_j).
+  // Ties (t_i on P_j, as at corners and creases, where many samples share a closest point; see
+  // featureTies): samples outside (d > 0) see a convex feature (keep f_j ≤ 0), inside a concave one.
+  // So a supporting plane at a corner keeps only its corner: its face shrinks to (nearly) nothing,
+  // while it clips the planes of the flat areas around it exactly along the edge or at the corner.
+  // Nearly parallel neighbors (angle < parallelDeg) are split by their Voronoi bisector instead,
+  // since their plane-plane line is ill-defined. planes: owner -> { point, normal, d }.
+  // Feature points: tangent points on a corner or crease, where samples on both sides share
+  // closest points. Their planes are supporting planes, not tangent planes of a patch.
+  // For a pair (i, j) whose normals turn much faster than patch j's curvature allows (θ > 3 κ_j r +
+  // 10°, r = |t_i − t_j|), t_i is on the feature if it is no farther off P_j than j's curvature
+  // explains (|f_j(t_i)| ≤ κ_j r²): exactly on it for a flat patch (box edges and corners), up to
+  // curvature for a curved one (the two-sphere crease). Smooth pairs never qualify, and neither does
+  // a face point near a box edge: it is first-order off the adjacent face's plane.
+  // κ_j: median normal turn per unit distance from j to neighbors with similar normals (< 20°).
+  function featureTies(planes, nbrs) {
+    const kappa = new Map();
+    for (const [j, pj] of planes) {
+      const ks = [];
+      for (const k of nbrs.get(j) || []) {
+        const pk = planes.get(k), c = pj.normal[0] * pk.normal[0] + pj.normal[1] * pk.normal[1] + pj.normal[2] * pk.normal[2];
+        const r = Math.sqrt(dist2(pj.point, pk.point));
+        if (c > Math.cos(20 * Math.PI / 180) && r > 1e-9) ks.push(Math.acos(Math.min(1, c)) / r);
+      }
+      ks.sort((a, b) => a - b);
+      kappa.set(j, ks.length ? ks[ks.length >> 1] : 0);
+    }
+    // tie(i, j): t_i is on the feature shared with patch j.
+    return (i, j) => {
+      const pi = planes.get(i), pj = planes.get(j), kj = kappa.get(j);
+      const c = pi.normal[0] * pj.normal[0] + pi.normal[1] * pj.normal[1] + pi.normal[2] * pj.normal[2];
+      const r = Math.sqrt(dist2(pi.point, pj.point));
+      if (Math.acos(Math.min(1, c)) <= 3 * kj * r + 10 * Math.PI / 180) return false;
+      const f = pj.normal[0] * (pi.point[0] - pj.point[0]) + pj.normal[1] * (pi.point[1] - pj.point[1]) + pj.normal[2] * (pi.point[2] - pj.point[2]);
+      return Math.abs(f) <= kj * r * r + 1e-9;
+    };
+  }
+
+  function clipTangentPlanes(planes, nbrs, parallelDeg, ring2 = true) {
+    const cosPar = Math.cos(parallelDeg * Math.PI / 180), polys = [];
+    const tie = featureTies(planes, nbrs), feat = new Set();
+    for (const [i] of planes) for (const j of nbrs.get(i) || []) if (tie(i, j)) { feat.add(i); break; }
+    let nEmpty = 0, nEmptyFeature = 0;
+    for (const [i, { point: t, normal: n, d }] of planes) {
+      let N = nbrs.get(i);
+      if (!N) continue;
+      // A corner or crease point (t_i on a neighbor's non-parallel plane) may not see the planes
+      // that should cut its supporting plane down; give it the two-ring of neighbors.
+      const feature = feat.has(i);
+      if (feature && ring2) { const N2 = new Set(N); for (const j of N) for (const k of nbrs.get(j) || []) if (k !== i) N2.add(k); N = N2; }
+      const a = Math.abs(n[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
+      const u = [n[1] * a[2] - n[2] * a[1], n[2] * a[0] - n[0] * a[2], n[0] * a[1] - n[1] * a[0]];
+      const ul = Math.hypot(u[0], u[1], u[2]); u[0] /= ul; u[1] /= ul; u[2] /= ul;
+      const w = [n[1] * u[2] - n[2] * u[1], n[2] * u[0] - n[0] * u[2], n[0] * u[1] - n[1] * u[0]];
+      let R = 0;
+      for (const j of N) R = Math.max(R, Math.sqrt(dist2(t, planes.get(j).point)));
+      R = 2 * R + 1e-6;
+      let poly = [[-R, -R], [R, -R], [R, R], [-R, R]]; // 2D coordinates (along u, w) about t
+      for (const j of N) {
+        const { point: tj, normal: nj, d: dj } = planes.get(j);
+        const dv = [tj[0] - t[0], tj[1] - t[1], tj[2] - t[2]], dd = Math.hypot(dv[0], dv[1], dv[2]);
+        const cos = n[0] * nj[0] + n[1] * nj[1] + n[2] * nj[2];
+        if (cos > cosPar) {
+          if (dd < 1e-9) continue; // same point, same plane
+          // Voronoi bisector: 2 dv·(x − t) ≤ |dv|²
+          poly = clip2(poly, 2 * (dv[0] * u[0] + dv[1] * u[1] + dv[2] * u[2]), 2 * (dv[0] * w[0] + dv[1] * w[1] + dv[2] * w[2]), dd * dd);
+        } else {
+          const fji = nj[0] * (t[0] - tj[0]) + nj[1] * (t[1] - tj[1]) + nj[2] * (t[2] - tj[2]); // f_j(t_i)
+          // Keep the side of P_j that contains t_i. Only when t_i lies on P_j (a corner or crease
+          // point) decide by convexity: f_i(t_j) < 0 means convex, else ask the sample signs.
+          // On a feature, the feature point's sample tells convex (outside) from concave (inside).
+          const iOn = tie(i, j), jOn = tie(j, i), convex = iOn ? d > 0 : jOn ? dj > 0 : fji < 0;
+          // Two points on the same edge (or corner) have planes through the same line, which never
+          // separate them along it; split them by their Voronoi bisector too.
+          if (iOn && jOn && dd > 1e-9) poly = clip2(poly, 2 * (dv[0] * u[0] + dv[1] * u[1] + dv[2] * u[2]), 2 * (dv[0] * w[0] + dv[1] * w[1] + dv[2] * w[2]), dd * dd);
+          const sg = convex ? 1 : -1; // keep sg · f_j(x) ≤ 0, with x = t + p0 u + p1 w
+          poly = clip2(poly, sg * (nj[0] * u[0] + nj[1] * u[1] + nj[2] * u[2]), sg * (nj[0] * w[0] + nj[1] * w[1] + nj[2] * w[2]), -sg * fji);
+        }
+        if (poly.length < 3) break;
+      }
+      if (poly.length < 3) { nEmpty++; if (feature) nEmptyFeature++; continue; }
+      polys.push({ owner: i, normal: n, feature,
+        pts: poly.map(([p, q]) => [t[0] + p * u[0] + q * w[0], t[1] + p * u[1] + q * w[1], t[2] + p * u[2] + q * w[2]]) });
+    }
+    return { polys, nEmpty, nEmptyFeature };
+  }
+
+  const api = { recoverSurface, mirroredSites, contourNeighbors, clipTangentPlanes };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Recover = api;
 })(this);

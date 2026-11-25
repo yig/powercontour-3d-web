@@ -60,6 +60,7 @@
   <div class="row"><label>Seed</label><input type="number" id="seed" value="1"></div>
   <label class="check"><input type="checkbox" id="sampled" checked> Sampled points</label>
   <label class="check"><input type="checkbox" id="tangent"> Tangent points</label>
+  <label class="check"><input type="checkbox" id="mirrored"> Mirrored pairs t ± δn</label>
 
   <h2>Input spheres</h2>
   <div class="row"><label>Opacity</label><input type="range" id="sphOp" min="0" max="1" step="0.01" value="0.15"><span class="val" id="sphOp-v"></span></div>
@@ -76,7 +77,13 @@
   <div id="faceLegend"></div>
 
   <h2>Recovered surface</h2>
-  <label class="check"><input type="checkbox" id="recShow"> Intersect tangent planes</label>
+  <div class="row"><label>Method</label>
+    <select id="recMethod">
+      <option value="off">Off</option>
+      <option value="regions">Contract contour regions</option>
+      <option value="clip">Clip tangent planes</option>
+    </select></div>
+  <div id="recLegend"></div>
 
   <h2>Reference</h2>
   <div class="row"><label>True surface</label><input type="range" id="surfOp" min="0" max="1" step="0.01" value="0"><span class="val" id="surfOp-v"></span></div>
@@ -204,10 +211,15 @@ const FACE_TYPES = [
   { key: 'own', label: 'sample – own tangent', color: new THREE.Color(0x60d0a0) },
   { key: 'other', label: 'sample – other tangent', color: new THREE.Color(0xb080e0) },
   { key: 'tt', label: 'tangent – tangent', color: new THREE.Color(0xe0e0e0) },
+  { key: 'mplane', label: 'mirror pair (tangent plane)', color: new THREE.Color(0x60d0a0) },
+  { key: 'mstep', label: 'mirror step (Voronoi face)', color: new THREE.Color(0xe07040) },
 ];
 
 let groups = { merged: null, centers: null, edges: null, surface: null, recovered: null };
 const REC_LAMBDA = 0.01; // recover.js: pull of each recovered vertex toward its contour vertex
+const MIRROR_DELTA = 1e-3; // mirrored pairs sit at t ± δn
+const PARALLEL_DEG = 10;   // clipped tangent planes: neighbors closer than this in angle split by Voronoi bisector
+const COL_REC = new THREE.Color(0x9fc6d8), COL_REC_FEATURE = new THREE.Color(0xf0a040);
 let data = null; // { sites, weights, signs, isTangent, owner, cells }
 
 function disposeGroup(obj) {
@@ -219,32 +231,46 @@ function disposeGroup(obj) {
 function compute() {
   const shape = shapes[$('shape').value];
   const inputs = samplePoints(+$('npts').value, $('sampling').value, +$('seed').value | 0, shape.sdf);
-  const sites = [], weights = [], signs = [], isTangent = [], owner = []; // owner: index of the sample a site comes from
-  const planes = new Map(); // owner -> its tangent plane { point, normal }
+  const sites = [], weights = [], signs = [], isTangent = [], isMirror = [], owner = []; // owner: index of the sample a site comes from
+  const planes = new Map(); // owner -> its tangent plane { point, normal, d }
+  inputs.forEach((p, k) => {
+    const d = shape.sdf(p);
+    if (Math.abs(d) < 1e-9) return; // already on the surface: no tangent plane
+    const g = gradient(shape.sdf, p);
+    planes.set(k, { point: [p[0] - d * g[0], p[1] - d * g[1], p[2] - d * g[2]], normal: g, d });
+  });
   if ($('sampled').checked) {
     inputs.forEach((p, k) => {
       const d = shape.sdf(p);
-      sites.push(p); weights.push(d * d); signs.push(d >= 0 ? 1 : -1); isTangent.push(false); owner.push(k);
+      sites.push(p); weights.push(d * d); signs.push(d >= 0 ? 1 : -1); isTangent.push(false); isMirror.push(false); owner.push(k);
     });
   }
   if ($('tangent').checked) {
-    inputs.forEach((p, k) => {
-      const d = shape.sdf(p);
-      if (Math.abs(d) < 1e-9) return; // already on the surface
-      const g = gradient(shape.sdf, p);
-      sites.push([p[0] - d * g[0], p[1] - d * g[1], p[2] - d * g[2]]);
-      weights.push(0); signs.push(d >= 0 ? -1 : 1); isTangent.push(true); owner.push(k);
-      planes.set(k, { point: sites[sites.length - 1], normal: g });
-    });
+    for (const [k, { point, d }] of planes) {
+      sites.push(point); weights.push(0); signs.push(d >= 0 ? -1 : 1); isTangent.push(true); isMirror.push(false); owner.push(k);
+    }
+  }
+  if ($('mirrored').checked) {
+    const m = Recover.mirroredSites(planes, MIRROR_DELTA);
+    m.sites.forEach((p, k) => { sites.push(p); weights.push(0); signs.push(m.signs[k]); isTangent.push(true); isMirror.push(true); owner.push(m.owner[k]); });
   }
   const t0 = performance.now();
   const cells = PowerDiagram.computePowerDiagram(sites, weights, [-B, -B, -B], [B, B, B]);
   const ms = performance.now() - t0;
-  data = { sites, weights, signs, isTangent, owner, planes, cells, ms };
-  // Surface recovery needs both kinds of sites: it intersects the tangent planes of the regions
-  // that the sample-to-own-tangent faces grow into on the contour (recover.js).
-  data.recovered = $('sampled').checked && $('tangent').checked
-    ? Recover.recoverSurface(sites, signs, owner, cells, planes, REC_LAMBDA) : null;
+  data = { sites, weights, signs, isTangent, isMirror, owner, planes, cells, ms };
+  data.recovered = null;
+  const method = $('recMethod').value;
+  if (method === 'regions' && $('sampled').checked && $('tangent').checked && !$('mirrored').checked) {
+    // Intersects the tangent planes of the regions that the sample-to-own-tangent faces grow into.
+    data.recovered = Recover.recoverSurface(sites, signs, owner, cells, planes, REC_LAMBDA);
+  } else if (method === 'clip') {
+    // Connectivity from the mirrored-pair diagram (reused if that is exactly what is displayed).
+    const onlyMirror = !$('sampled').checked && !$('tangent').checked && $('mirrored').checked;
+    const m = onlyMirror ? { signs, owner } : Recover.mirroredSites(planes, MIRROR_DELTA);
+    const mcells = onlyMirror ? cells : PowerDiagram.computePowerDiagram(m.sites, m.weights, [-B, -B, -B], [B, B, B]);
+    const nbrs = Recover.contourNeighbors(m.signs, m.owner, mcells);
+    data.recovered = { clip: true, ...Recover.clipTangentPlanes(planes, nbrs, PARALLEL_DEG) };
+  }
   rebuildAll();
 }
 
@@ -278,7 +304,9 @@ function buildTransparent() {
   disposeGroup(groups.merged); disposeGroup(groups.edges);
   const { sites, weights, signs, isTangent, owner, cells } = data;
   const byType = $('pcColorBy').value === 'type';
-  const faceType = (i, j) => isTangent[i] && isTangent[j] ? 3 : !isTangent[i] && !isTangent[j] ? 0 : owner[i] === owner[j] ? 1 : 2;
+  const { isMirror } = data;
+  const faceType = (i, j) => isMirror[i] || isMirror[j] ? (isMirror[i] && isMirror[j] && owner[i] === owner[j] ? 4 : 5)
+    : isTangent[i] && isTangent[j] ? 3 : !isTangent[i] && !isTangent[j] ? 0 : owner[i] === owner[j] ? 1 : 2;
   const typeCount = FACE_TYPES.map(() => 0);
   const tp = SPHERE_TEMPLATE.attributes.position.array, tn = SPHERE_TEMPLATE.attributes.normal.array;
   const tv = tp.length / 3;
@@ -432,26 +460,36 @@ function buildRecovered() {
   disposeGroup(groups.recovered);
   groups.recovered = null;
   const r = data.recovered;
-  if (!r || !$('recShow').checked) { applyVisuals(); return; }
-  const pos = [], epos = [], hole = [];
-  for (const P of r.polys) {
+  $('recLegend').innerHTML = r?.clip ? [[COL_REC, 'tangent plane face'], [COL_REC_FEATURE, 'corner / crease tangent point']]
+    .map(([c, l]) => `<span class="legend" style="background:#${c.getHexString()}"></span>${l}`).join('<br>') : '';
+  if (!r) { applyVisuals(); return; }
+  const pos = [], col = [], epos = [], hole = [];
+  if (r.clip) {
+    // Each face is its own polygon; nothing is shared, so there are no hole edges to report.
+    for (const P of r.polys) {
+      const V = P.pts, c = P.feature ? COL_REC_FEATURE : COL_REC;
+      for (let k = 1; k + 1 < V.length; k++) { pos.push(...V[0], ...V[k], ...V[k + 1]); for (let q = 0; q < 3; q++) col.push(c.r, c.g, c.b); }
+      for (let k = 0; k < V.length; k++) epos.push(...V[k], ...V[(k + 1) % V.length]);
+    }
+  } else for (const P of r.polys) {
     const V = P.verts.map(k => r.verts[k]);
-    for (let k = 1; k + 1 < V.length; k++) pos.push(...V[0], ...V[k], ...V[k + 1]);
+    for (let k = 1; k + 1 < V.length; k++) { pos.push(...V[0], ...V[k], ...V[k + 1]); for (let q = 0; q < 3; q++) col.push(COL_REC.r, COL_REC.g, COL_REC.b); }
     for (let k = 0; k < V.length; k++) epos.push(...V[k], ...V[(k + 1) % V.length]);
   }
   // Holes: a directed polygon edge whose reverse is in no polygon borders a missing region.
   const dir = new Set();
-  for (const P of r.polys) P.verts.forEach((a, k) => dir.add(`${a},${P.verts[(k + 1) % P.verts.length]}`));
-  for (const P of r.polys) P.verts.forEach((a, k) => {
+  if (!r.clip) for (const P of r.polys) P.verts.forEach((a, k) => dir.add(`${a},${P.verts[(k + 1) % P.verts.length]}`));
+  if (!r.clip) for (const P of r.polys) P.verts.forEach((a, k) => {
     const b = P.verts[(k + 1) % P.verts.length];
     if (!dir.has(`${b},${a}`)) hole.push(...r.verts[a], ...r.verts[b]);
   });
   r.nHoleEdges = hole.length / 6;
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
   g.computeVertexNormals();
   const grp = new THREE.Group();
-  grp.add(new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: 0x9fc6d8, side: THREE.DoubleSide, flatShading: true,
+  grp.add(new THREE.Mesh(g, new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, flatShading: true,
     roughness: 0.45, metalness: 0.05, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, clippingPlanes: clipPlanes() })));
   const eg = new THREE.BufferGeometry(); eg.setAttribute('position', new THREE.Float32BufferAttribute(epos, 3));
   grp.add(new THREE.LineSegments(eg, new THREE.LineBasicMaterial({ color: 0x2a3440, clippingPlanes: clipPlanes() })));
@@ -492,26 +530,27 @@ function applyVisuals() {
 }
 
 function updateStats() {
-  const nt = data.isTangent.filter(Boolean).length, ns = data.sites.length - nt;
+  const nm = data.isMirror.filter(Boolean).length, nt = data.isTangent.filter(Boolean).length - nm, ns = data.sites.length - nt - nm;
   const empty = data.cells.filter(c => c.length === 0).length;
   $('stats').textContent =
-    `${ns} sampled + ${nt} tangent sites\n` +
+    `${ns} sampled + ${nt} tangent + ${nm} mirrored sites\n` +
     `${empty} empty power cells\n` +
     `${data.nFaces} contour faces, area ${data.area.toFixed(3)}\n` +
-    (!$('recShow').checked ? '' : !data.recovered ? 'recovery needs sampled and tangent points\n'
+    ($('recMethod').value === 'off' ? '' : !data.recovered ? 'region contraction needs sampled + tangent points only\n'
+      : data.recovered.clip ? `clipped planes: ${data.recovered.polys.length} faces, ${data.recovered.nEmpty} clipped away ` +
+        `(${data.recovered.nEmptyFeature} at corners / creases)\n`
       : `recovered: ${data.recovered.polys.length} faces, ${data.recovered.verts.length} vertices, ` +
         `${data.recovered.badOwners.length} non-disc regions, ${data.recovered.nHoleEdges} hole edges\n`) +
     `power diagram: ${data.ms.toFixed(0)} ms`;
 }
 
 // ---------- UI wiring ----------
-for (const id of ['shape', 'sampling', 'seed', 'sampled', 'tangent']) $(id).addEventListener('change', compute);
+for (const id of ['shape', 'sampling', 'seed', 'sampled', 'tangent', 'mirrored', 'recMethod']) $(id).addEventListener('change', compute);
 $('npts').addEventListener('input', applyVisuals);
 $('npts').addEventListener('change', compute);
 for (const id of ['sphOp', 'pcOp', 'surfOp', 'sliceZ']) $(id).addEventListener('input', applyVisuals);
 for (const id of ['centers', 'pcEdges', 'slice', 'bbox']) $(id).addEventListener('change', applyVisuals);
 $('pcColorBy').addEventListener('change', buildTransparent);
-$('recShow').addEventListener('change', () => { buildRecovered(); updateStats(); });
 
 function resize() {
   const w = window.innerWidth, h = window.innerHeight;
