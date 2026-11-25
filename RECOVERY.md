@@ -13,6 +13,12 @@ For each sample `p_a` with SDF value `d_a ≠ 0`:
 
 The trusted data are `t_a`, `n_a`, and the sign of `d_a`. The power contour is the set of faces between a `+` cell and a `−` cell. Each site has an *owner*: the sample it comes from.
 
+The figures in 2D are computed with the same constructions in the plane (a 2D power diagram of samples and tangent points on the union of two ellipses, which has two concave creases). In 2D a tangent plane is a line, a face is a segment, and a vertex is where two lines meet. The 3D figures are screenshots of the viewer. To regenerate them: `node figures/make2d.js` and `bash figures/shoot3d.sh`.
+
+![One outside sample p, its tangent point t, the circle of radius d about p touching the surface at t, and the normal n. Their two cells, outlined, form the super cell; the own face is the part of the tangent line inside it.](figures/fig-setup.svg)
+
+*One sample `p` (sphere of radius `d`) and its tangent point `t`. Their two cells together (outlined) are the super cell `C`; the boundary between them is the own face `F`, which lies exactly in the tangent line (dotted). Note that `p` is not inside the outlined cell: neighbors' larger spheres take that space, as is common in power diagrams.*
+
 ## Structure
 
 **1. The bisector of a sample and its tangent point is the tangent plane.** With `p = t + d n`:
@@ -33,6 +39,14 @@ a convex polygon lying exactly in the tangent plane. There is exactly one per ta
 
 **3. Steps.** Every other contour face lies on a wall between two super cells `C_a` and `C_b`. On the wall, `P_a` and `P_b` cut two different lines; the step is the region between them (a double wedge with its apex where the line `P_a ∩ P_b` crosses the wall). Steps exist because neighboring tangent planes do not meet on the wall.
 
+![The 2D power diagram of 70 samples and their tangent points. Almost the whole contour is own faces; steps are visible only at the two concave creases, and the inset magnifies a step on a smooth part 63 times.](figures/fig-structure.svg)
+
+*2D, `s = 1`: the contour (thick) is own faces (gold) joined by steps (red). In 2D, steps on smooth parts are tiny (median length `10⁻⁴` against `0.08` for own faces; inset, ×63); the visible ones are at the concave creases, where the two sides' tangent lines meet inside the shape.*
+
+![The torus contour in 3D, sliced at z = 0, colored by face type: green own faces, purple steps, a few gold sample–sample faces.](figures/torus-contour.png)
+
+*3D, torus, 300 samples, `s = 1`, sliced at `z = 0`, colored by face type: own faces (green, each in its tangent plane), steps (purple: sample – other tangent point), and sample – sample faces (gold). In 3D a step is a polygon on a wall between super cells, and steps take a visible share of the contour.*
+
 **4. Own faces never share an edge** (generically). A corner of `F_a` is a power-diagram vertex with four cells, two of which belong to `a`, so it touches at most three owners. An edge of `F_a` has a third cell from another owner, so across it is a step. The exception is a degenerate configuration: on a sphere, by symmetry, `P_a ∩ P_b` lies exactly in the bisector, so there are no steps and the contour already is the tangent-plane polyhedron.
 
 **5. The goal.** Eliminate the steps: extend each own face in its plane until it meets its neighbors' planes. The result has one face per tangent point, edges on the lines `P_a ∩ P_b`, and vertices at the points `P_a ∩ P_b ∩ P_c`. Equivalently, move the walls between super cells so they contain the lines `P_a ∩ P_b`. Then the function `F(x) = f_{a(x)}(x)`, where `a(x)` is the super cell containing `x`, becomes continuous, and its zero set is watertight.
@@ -49,6 +63,10 @@ p_a(s) = t_a + s (p_a − t_a),   weight (s d_a)².
 
 By (1), the own face of every tangent point is unchanged for every `s`; only the steps change. The data `t_a`, `n_a`, `sign(d_a)` are untouched. Since `π_{p(s)}(x) − π_t(x) = −2 s d f(x)`, the super cells converge as `s → 0` to the Voronoi cells of the tangent points, each split by its tangent plane. The steps become thin: their height is set by how far neighboring planes miss each other on the Voronoi bisector, about `κh²` for curvature `κ` and spacing `h`.
 
+![The same samples at sphere scale 1 and 0.1. The own faces are identical; the cells around them change, and the steps at the creases change length.](figures/fig-sphere-scale.svg)
+
+*Sphere scale in 2D. The own faces (gold) are identical at `s = 1` and `s = 0.1`, as (1) predicts; only the cells and the steps change. At `s = 0.1` the tangent points' cells approach their Voronoi cells. At the lower concave crease the step gets longer, not shorter: it approaches the Voronoi bisector of the two tangent points on either side of the crease, while the true crease is where their tangent lines meet.*
+
 ## Approach 1: Contract contour regions (`recoverSurface`)
 
 Each step is given to one of its two owners, so the contour is partitioned into one region per tangent point.
@@ -59,6 +77,10 @@ Each step is given to one of its two owners, so the contour is partitioned into 
 4. Output faces: each region's boundary loop on the contour, keeping only the output vertices on it. A region whose boundary is not one simple loop, or has fewer than three output vertices, leaves a hole (reported as a non-disc region).
 
 Because the regions tile the contour, neighboring faces share their boundary and vertices by construction, so cracks only appear at non-disc regions. The nearest-tangent-point rule already imposes Voronoi locality on the regions, which is why this method depends little on `s`.
+
+![Left: the contour at s = 0.1 colored by region, one color per tangent point. Right: the recovered polygon, with vertices where neighboring regions' tangent lines meet, follows the true curve including both creases.](figures/fig-contract.svg)
+
+*Contract contour regions in 2D, `s = 0.1`. Left: each contour edge colored by the region (tangent point) it is given to; the long crease steps go to one side. Right: one vertex where each pair of neighboring regions meets, at the intersection of their tangent lines (green), giving a polygon with one edge per tangent point. Every vertex here is the exact intersection, within the trust region; the farthest is 0.022 off the curve.*
 
 ## Approach 2: Extend own faces (`extendOwnFaces`)
 
@@ -93,6 +115,16 @@ The vertices lie on their three planes to `10⁻¹²` or better. The problem is 
 
 The missing piece of the theory: that three faces adjacent on the contour have tangent planes meeting near the surface. That holds where neighboring normals spread in two directions. It fails along curves where they vary in only one direction (the torus's top and bottom circles, where one principal curvature is zero) and on cylinder-like regions in general. There the arrangement of the planes has long faces along the flat direction, its adjacency is anisotropic, and the contour's isotropic (Voronoi-like) adjacency can name a triple whose planes do not meet nearby. The trust region encodes the missing condition directly: an intersection is only used where the planes are valid.
 
+![Near an inflection, the tangent lines at two neighboring points are nearly parallel and meet far away. The trust region, a circle around the contour vertex, excludes that intersection; the placed vertex moves only along the best-determined direction.](figures/fig-far-intersection.svg)
+
+*The 2D analog. Near an inflection (zero curvature) the tangent lines of two neighbors are nearly parallel and offset, so their exact intersection is far (here 2.7 from the contour vertex, about six times its distance to the farther tangent point). It is the correct intersection of the two lines; the lines are just not valid that far out. The trust region (2 × the distance to the farther tangent point) rejects it, and the vertex moves only along the best-determined direction, onto the average line.*
+
+| exact intersections, no trust region | `tau = 10⁻²`, no trust region | exact + trust 2 (default) |
+|---|---|---|
+| ![Torus recovered with exact intersections: long spikes in every direction.](figures/torus-exact.png) | ![Torus recovered with tau = 1e-2: no spikes.](figures/torus-tau.png) | ![Torus recovered with exact intersections in a trust region: no spikes.](figures/torus-trust.png) |
+
+*Torus, 1500 uniform samples, `s = 0.1`, Contract contour regions. Left: exact intersections fly up to 615 units away. Middle: dropping small eigenvalues removes them, but it also drops exact intersections at sharp features (the box then has 16 vertices off). Right: the trust region removes them and keeps exact intersections where they are near.*
+
 ### Results of the fix
 
 Contract contour regions, `s = 0.1`; "off" counts vertices with `|sdf| > 0.02`:
@@ -110,6 +142,12 @@ Contract contour regions, `s = 0.1`; "off" counts vertices with `|sdf| > 0.02`:
 True areas: torus 8.88, two spheres 6.91, box 6.64. "Crease" is the median distance from crease vertices to the true crease circle.
 
 The trust region removes every far vertex while keeping exact intersections where they are valid, so the box comes out exact. On smooth parts it keeps more intersections than `tau = 10⁻²` did, and an intersection two spacings out carries about `κr²/2` of extrapolation error, so a few more vertices are off by more than 0.02 there; the worst errors are about the same. With `trust = 1` smooth parts are tighter but some box corners are cut short (59 off at 1500 samples).
+
+| box | two spheres |
+|---|---|
+| ![Box recovered with the default: flat faces and sharp edges and corners.](figures/box-trust.png) | ![Two spheres recovered with the default: smooth spheres, with fins along the crease.](figures/twospheres-trust.png) |
+
+*Default settings, 1500 uniform samples, `s = 0.1`. The box is exact: every vertex is an exact intersection of its planes. The two spheres are smooth, but the concave crease still has fins: faces whose vertices are each near the surface (max 0.067 off) but which reach across the crease.*
 
 ## Is there an ideal `s` and `tau`?
 
