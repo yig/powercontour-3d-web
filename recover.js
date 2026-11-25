@@ -59,7 +59,7 @@
   // planes: owner -> { point, normal } (the tangent point and the unit SDF gradient).
   // lambda: pull toward the contour vertex; keeps nearly parallel planes well-posed.
   // Returns { verts, anchors, vertOwners, polys: [{ owner, normal, verts }], badOwners, nRegions }.
-  function recoverSurface(sites, signs, owner, cells, planes, lambda) {
+  function recoverSurface(sites, signs, owner, cells, planes, lambda, tau = 0) {
     // 1. Contour faces (oriented from the + side), welded, each labeled with the owning region.
     const welder = makeWelder(), faces = [];
     cells.forEach((cf, i) => {
@@ -136,7 +136,10 @@
     vLabels.forEach((ls, k) => {
       if (ls.size < 3) return;
       const v = welder.pts[k];
-      const A = [[lambda, 0, 0], [0, lambda, 0], [0, 0, lambda]], b = [lambda * v[0], lambda * v[1], lambda * v[2]];
+      // tau: exact plane intersection, truncated where the planes are dependent (qefTruncated);
+      // otherwise Tikhonov regularization toward the contour vertex with weight lambda.
+      const reg = tau ? 0 : lambda;
+      const A = [[reg, 0, 0], [0, reg, 0], [0, 0, reg]], b = [reg * v[0], reg * v[1], reg * v[2]];
       for (const o of ls) {
         const { normal: n, point: t } = planes.get(o), c = n[0] * t[0] + n[1] * t[1] + n[2] * t[2];
         for (let r = 0; r < 3; r++) {
@@ -144,7 +147,7 @@
           b[r] += n[r] * c;
         }
       }
-      outId[k] = verts.length; verts.push(solve3(A, b)); anchors.push(v); vertOwners.push([...ls]);
+      outId[k] = verts.length; verts.push(tau ? qefTruncated(A, b, v, tau) : solve3(A, b)); anchors.push(v); vertOwners.push([...ls]);
     });
 
     // 5. Boundary of each region: half-edges whose twin belongs to another region (or is missing).
@@ -176,6 +179,151 @@
       polys.push({ owner: label, normal: planes.get(label).normal, verts: ring.reverse() });
     }
     return { verts, anchors, vertOwners, polys, badOwners, nRegions: bnext.size };
+  }
+
+  // ---------- Extended own faces ----------
+  //
+  // One face per tangent point; every other contour face is eliminated. Sample a and tangent point
+  // t_a form a super cell C_a, and the own face F_a = P_a ∩ C_a lies exactly in the tangent plane.
+  // Every other contour face is a step on a wall between two super cells, where neighboring planes
+  // do not meet on the wall. Eliminating the steps means extending each own face in its plane until
+  // it meets its neighbors' planes:
+  //   - each edge of F_a borders a step toward one neighbor b (the owner of the third cell there);
+  //     a run of edges facing b becomes part of the line P_a ∩ P_b;
+  //   - a corner of F_a has two cells of a plus one of b and one of c, so it touches at most three
+  //     owners; a switch from b to c becomes the vertex P_a ∩ P_b ∩ P_c, shared by faces a, b, c.
+  // Vertices are exact plane intersections; when the planes are (nearly) dependent, e.g. coplanar on
+  // a flat face, the vertex stays at its contour position projected onto them (truncated QEF).
+  // A triple that is not seen from all three faces leaves a crack; hole edges report it.
+  function extendOwnFaces(sites, signs, owner, cells, planes, opts) {
+    const o = { tau: 1e-2, maxJunction: 4, ...opts };
+    const welder = makeWelder();
+    const triples = new Map(); // "a,b,c" -> { owners, sum, n }
+    const rings = [];          // per own face: { owner, keys: [triple key or null], anchors }
+    cells.forEach((cf, i) => {
+      if (signs[i] <= 0) return; // each own face once, from its + cell
+      const a = owner[i];
+      if (!planes.get(a)) return;
+      const ownIdx = cf.findIndex(f => f.label >= 0 && owner[f.label] === a && signs[f.label] < 0);
+      if (ownIdx < 0) return;
+      // Welded vertex ids of every face of this cell, to find the third cell at each edge of F_a.
+      const ids = cf.map(f => f.verts.map(p => welder.id(p)));
+      const edgeLabel = new Map();
+      cf.forEach((f, fi) => {
+        if (fi === ownIdx) return;
+        const v = ids[fi];
+        for (let k = 0; k < v.length; k++) { const p = v[k], q = v[(k + 1) % v.length]; edgeLabel.set(p < q ? `${p},${q}` : `${q},${p}`, f.label); }
+      });
+      const V = ids[ownIdx], P = cf[ownIdx].verts;
+      const nb = V.map((p, k) => { const q = V[(k + 1) % V.length], l = edgeLabel.get(p < q ? `${p},${q}` : `${q},${p}`);
+        return l === undefined || l < 0 ? -1 : owner[l]; }); // -1: the bounding box
+      // Corners where the neighbor switches: vertex k + 1 between edges k and k + 1.
+      const ring = [];
+      for (let k = 0; k < V.length; k++) {
+        const b = nb[k], c = nb[(k + 1) % V.length];
+        if (b === c) continue;
+        const corner = P[(k + 1) % V.length];
+        if (b < 0 || c < 0) { ring.push({ key: null, at: corner }); continue; }
+        const ow = [a, b, c].sort((x, y) => x - y), key = ow.join(',');
+        if (!triples.has(key)) triples.set(key, { owners: ow, sum: [0, 0, 0], n: 0 });
+        const e = triples.get(key); e.sum[0] += corner[0]; e.sum[1] += corner[1]; e.sum[2] += corner[2]; e.n++;
+        ring.push({ key, at: corner });
+      }
+      rings.push({ owner: a, ring });
+    });
+    // Flips: where four owners meet nearly at one point, the faces can disagree about which diagonal
+    // is an edge, so a triple is seen by fewer than its three faces. Merge each such junction (the
+    // incomplete triples linked by sharing two owners, at most o.maxJunction owners in all) into one
+    // vertex, where all of its planes meet.
+    const seenBy = new Map();
+    for (const { owner: a, ring } of rings) for (const { key } of ring) if (key !== null) {
+      if (!seenBy.has(key)) seenBy.set(key, new Set()); seenBy.get(key).add(a);
+    }
+    const group = new Map(); // triple key -> representative key
+    const find = k => { while (group.get(k) !== k) k = group.get(k); return k; };
+    for (const k of triples.keys()) group.set(k, k);
+    const incomplete = [...triples.keys()].filter(k => seenBy.get(k).size < 3);
+    const byPair = new Map();
+    for (const k of incomplete) { const [x, y, z] = triples.get(k).owners;
+      for (const pk of [`${x},${y}`, `${x},${z}`, `${y},${z}`]) { if (!byPair.has(pk)) byPair.set(pk, []); byPair.get(pk).push(k); } }
+    const members = new Map(); // representative -> owners of the merged group
+    for (const k of triples.keys()) members.set(k, new Set(triples.get(k).owners));
+    for (const ks of byPair.values()) for (let q = 1; q < ks.length; q++) {
+      const r1 = find(ks[0]), r2 = find(ks[q]);
+      if (r1 === r2) continue;
+      const u = new Set([...members.get(r1), ...members.get(r2)]);
+      if (u.size > o.maxJunction) continue;
+      group.set(r2, r1); members.set(r1, u);
+    }
+    // Vertices: where the planes of each (possibly merged) junction meet.
+    const verts = [], anchors = [], vertOwners = [], idOf = new Map(), sums = new Map();
+    for (const [key, e] of triples) {
+      const g = find(key);
+      if (!sums.has(g)) sums.set(g, { sum: [0, 0, 0], n: 0 });
+      const t = sums.get(g); t.sum[0] += e.sum[0]; t.sum[1] += e.sum[1]; t.sum[2] += e.sum[2]; t.n += e.n;
+    }
+    let nMerged = 0;
+    for (const [g, { sum, n: cnt }] of sums) {
+      const m = [sum[0] / cnt, sum[1] / cnt, sum[2] / cnt], ows = [...members.get(g)];
+      if (ows.length > 3) nMerged++;
+      const A = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], r = [0, 0, 0];
+      for (const ow of ows) {
+        const { normal: nn, point: t } = planes.get(ow), c = nn[0] * t[0] + nn[1] * t[1] + nn[2] * t[2];
+        for (let p = 0; p < 3; p++) { for (let q = 0; q < 3; q++) A[p][q] += nn[p] * nn[q]; r[p] += nn[p] * c; }
+      }
+      idOf.set(g, verts.length); verts.push(qefTruncated(A, r, m, o.tau)); anchors.push(m); vertOwners.push(ows);
+    }
+    // Faces: the ring of switch vertices (merged junctions collapse repeats); box corners keep their
+    // contour position.
+    const polys = [];
+    let nDegenerate = 0;
+    for (const { owner: a, ring } of rings) {
+      const vs = [];
+      for (const { key, at } of ring) {
+        let v;
+        if (key !== null) v = idOf.get(find(key));
+        else { verts.push(at); anchors.push(at); vertOwners.push([a]); v = verts.length - 1; }
+        if (vs[vs.length - 1] !== v) vs.push(v);
+      }
+      while (vs.length > 1 && vs[0] === vs[vs.length - 1]) vs.pop();
+      if (vs.length < 3) { nDegenerate++; continue; }
+      polys.push({ owner: a, normal: planes.get(a).normal, verts: vs });
+    }
+    // Cracks: a triple seen by fewer than three faces leaves directed edges without a reverse.
+    const dir = new Set();
+    for (const P of polys) P.verts.forEach((v, k) => dir.add(`${v},${P.verts[(k + 1) % P.verts.length]}`));
+    let open = 0;
+    for (const e of dir) { const [p, q] = e.split(','); if (!dir.has(`${q},${p}`)) open++; }
+    return { verts, anchors, vertOwners, polys, nDegenerate, nOpen: open, nTriples: triples.size, nMerged };
+  }
+
+  // Eigen-decomposition of a symmetric 3x3 matrix (Jacobi). Returns { vals, vecs (columns) }.
+  function eig3(A) {
+    const a = A.map(r => r.slice()), v = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+    for (let it = 0; it < 50; it++) {
+      let p = 0, q = 1;
+      if (Math.abs(a[0][2]) > Math.abs(a[p][q])) { p = 0; q = 2; }
+      if (Math.abs(a[1][2]) > Math.abs(a[p][q])) { p = 1; q = 2; }
+      if (Math.abs(a[p][q]) < 1e-18) break;
+      const th = 0.5 * Math.atan2(2 * a[p][q], a[q][q] - a[p][p]), c = Math.cos(th), s = Math.sin(th);
+      for (let k = 0; k < 3; k++) { const akp = a[k][p], akq = a[k][q]; a[k][p] = c * akp - s * akq; a[k][q] = s * akp + c * akq; }
+      for (let k = 0; k < 3; k++) { const apk = a[p][k], aqk = a[q][k]; a[p][k] = c * apk - s * aqk; a[q][k] = s * apk + c * aqk; }
+      for (let k = 0; k < 3; k++) { const vkp = v[k][p], vkq = v[k][q]; v[k][p] = c * vkp - s * vkq; v[k][q] = s * vkp + c * vkq; }
+    }
+    return { vals: [a[0][0], a[1][1], a[2][2]], vecs: v };
+  }
+  // Minimize Σ (n·x − c)² near m: x = m + pinv(A)(r − A m), dropping eigenvalues below tau · max.
+  // Independent planes: their exact intersection. Dependent ones: m projected onto them.
+  function qefTruncated(A, r, m, tau) {
+    const { vals, vecs } = eig3(A), lmax = Math.max(...vals);
+    const res = [0, 1, 2].map(i => r[i] - (A[i][0] * m[0] + A[i][1] * m[1] + A[i][2] * m[2]));
+    const x = m.slice();
+    for (let e = 0; e < 3; e++) {
+      if (vals[e] <= tau * lmax) continue;
+      const u = [vecs[0][e], vecs[1][e], vecs[2][e]], coef = (u[0] * res[0] + u[1] * res[1] + u[2] * res[2]) / vals[e];
+      x[0] += coef * u[0]; x[1] += coef * u[1]; x[2] += coef * u[2];
+    }
+    return x;
   }
 
   // ---------- Clipped tangent planes ----------
@@ -342,7 +490,7 @@
     return { polys, nEmpty, nEmptyFeature };
   }
 
-  const api = { recoverSurface, mirroredSites, contourNeighbors, clipTangentPlanes, CLIP_DEFAULTS };
+  const api = { recoverSurface, extendOwnFaces, mirroredSites, contourNeighbors, clipTangentPlanes, CLIP_DEFAULTS };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Recover = api;
 })(this);

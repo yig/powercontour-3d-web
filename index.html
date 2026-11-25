@@ -60,6 +60,7 @@
   <div class="row"><label>Points</label><input type="range" id="npts" min="10" max="1500" step="10" value="300"><span class="val" id="npts-v"></span></div>
   <div class="row"><label>Seed</label><input type="number" id="seed" value="1"></div>
   <label class="check"><input type="checkbox" id="sampled" checked> Sampled points</label>
+  <div class="row"><label>Sphere scale</label><input type="range" id="sScale" min="0.01" max="1" step="0.01" value="1"><span class="val" id="sScale-v"></span></div>
   <label class="check"><input type="checkbox" id="tangent"> Tangent points</label>
   <label class="check"><input type="checkbox" id="mirrored"> Mirrored pairs t ± δn</label>
 
@@ -82,8 +83,13 @@
     <select id="recMethod">
       <option value="off">Off</option>
       <option value="regions">Contract contour regions</option>
+      <option value="extend">Extend own faces</option>
       <option value="clip">Clip tangent planes</option>
     </select></div>
+  <div id="extendOpts">
+    <div class="row"><label>Dependent planes, log₁₀</label><input type="range" id="eTau" min="-8" max="-0.5" step="0.1" value="-2"><span class="val" id="eTau-v"></span></div>
+    <label class="check" id="eMergeRow"><input type="checkbox" id="eMerge" checked> Merge flipped junctions</label>
+  </div>
   <div id="clipOpts">
     <div class="row"><label>Parallel (°)</label><input type="range" id="cParallel" min="0" max="45" step="1" value="10"><span class="val" id="cParallel-v"></span></div>
     <label class="check"><input type="checkbox" id="cUnion" checked> Concave neighbors: union, not intersection</label>
@@ -195,7 +201,7 @@ const FACE_TYPES = [
 ];
 
 let groups = { merged: null, centers: null, edges: null, surface: null, recovered: null };
-const REC_LAMBDA = 0.01; // recover.js: pull of each recovered vertex toward its contour vertex
+const REC_LAMBDA = 0.01; // recover.js: Tikhonov pull toward the contour vertex, used only if tau = 0
 const MIRROR_DELTA = 1e-3; // mirrored pairs sit at t ± δn
 const COL_REC = new THREE.Color(0x9fc6d8), COL_REC_FEATURE = new THREE.Color(0xf0a040);
 let data = null; // { sites, weights, signs, isTangent, owner, cells }
@@ -206,6 +212,7 @@ function disposeGroup(obj) {
   obj.traverse(o => { o.geometry?.dispose(); (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => m?.dispose()); });
 }
 
+const extendOpts = () => ({ tau: 10 ** +$('eTau').value, maxJunction: $('eMerge').checked ? 4 : 3 });
 // The clip options only re-clip; the diagrams are not recomputed.
 const clipOpts = () => ({ parallelDeg: +$('cParallel').value, features: $('cFeatures').checked, similarDeg: +$('cSimilar').value,
   turnFactor: +$('cTurn').value, marginDeg: +$('cMargin').value, onPlaneFactor: +$('cOnPlane').value,
@@ -225,9 +232,13 @@ function compute() {
     planes.set(k, { point: t, normal: [(p[0] - t[0]) / d, (p[1] - t[1]) / d, (p[2] - t[2]) / d], d });
   });
   if ($('sampled').checked) {
+    // Sphere scale s moves each sample toward its tangent point, keeping its sphere tangent there:
+    // the own face (sample | tangent point) stays exactly in the tangent plane for any s.
+    const sc = +$('sScale').value;
     inputs.forEach((p, k) => {
-      const d = shape.sdf(p);
-      sites.push(p); weights.push(d * d); signs.push(d >= 0 ? 1 : -1); isTangent.push(false); isMirror.push(false); owner.push(k);
+      const d = shape.sdf(p), t = planes.get(k)?.point ?? p;
+      sites.push([t[0] + sc * (p[0] - t[0]), t[1] + sc * (p[1] - t[1]), t[2] + sc * (p[2] - t[2])]);
+      weights.push((sc * d) ** 2); signs.push(d >= 0 ? 1 : -1); isTangent.push(false); isMirror.push(false); owner.push(k);
     });
   }
   if ($('tangent').checked) {
@@ -245,9 +256,12 @@ function compute() {
   data = { sites, weights, signs, isTangent, isMirror, owner, planes, cells, ms };
   data.recovered = null;
   const method = $('recMethod').value;
-  if (method === 'regions' && $('sampled').checked && $('tangent').checked && !$('mirrored').checked) {
+  const contractible = $('sampled').checked && $('tangent').checked && !$('mirrored').checked;
+  if (method === 'extend' && contractible) {
+    data.recovered = Recover.extendOwnFaces(sites, signs, owner, cells, planes, extendOpts());
+  } else if (method === 'regions' && contractible) {
     // Intersects the tangent planes of the regions that the sample-to-own-tangent faces grow into.
-    data.recovered = Recover.recoverSurface(sites, signs, owner, cells, planes, REC_LAMBDA);
+    data.recovered = Recover.recoverSurface(sites, signs, owner, cells, planes, REC_LAMBDA, extendOpts().tau);
   } else if (method === 'clip') {
     // Connectivity from the mirrored-pair diagram (reused if that is exactly what is displayed).
     const onlyMirror = !$('sampled').checked && !$('tangent').checked && $('mirrored').checked;
@@ -512,7 +526,9 @@ function applyVisuals() {
   const planes = clipPlanes();
   scene.traverse(o => { if (o.material && o !== bboxHelper) o.material.clippingPlanes = planes; });
   $('clipOpts').style.display = $('recMethod').value === 'clip' ? '' : 'none';
-  for (const id of ['npts', 'sphOp', 'pcOp', 'surfOp', 'sliceZ', 'cParallel', 'cSimilar', 'cTurn', 'cMargin', 'cOnPlane']) $(id + '-v').textContent = (+$(id).value).toString().slice(0, 5);
+  $('extendOpts').style.display = ['extend', 'regions'].includes($('recMethod').value) ? '' : 'none';
+  $('eMergeRow').style.display = $('recMethod').value === 'extend' ? '' : 'none';
+  for (const id of ['npts', 'sScale', 'eTau', 'sphOp', 'pcOp', 'surfOp', 'sliceZ', 'cParallel', 'cSimilar', 'cTurn', 'cMargin', 'cOnPlane']) $(id + '-v').textContent = (+$(id).value).toString().slice(0, 5);
 }
 
 function updateStats() {
@@ -522,7 +538,9 @@ function updateStats() {
     `${ns} sampled + ${nt} tangent + ${nm} mirrored sites\n` +
     `${empty} empty power cells\n` +
     `${data.nFaces} contour faces, area ${data.area.toFixed(3)}\n` +
-    ($('recMethod').value === 'off' ? '' : !data.recovered ? 'region contraction needs sampled + tangent points only\n'
+    ($('recMethod').value === 'off' ? '' : !data.recovered ? 'needs sampled + tangent points only\n'
+      : data.recovered.nTriples !== undefined ? `extended faces: ${data.recovered.polys.length} faces, ${data.recovered.verts.length} vertices ` +
+        `(${data.recovered.nMerged} merged junctions), ${data.recovered.nDegenerate} degenerate, ${data.recovered.nHoleEdges} hole edges\n`
       : data.recovered.clip ? `clipped planes: ${data.recovered.polys.length} faces, ${data.recovered.nEmpty} clipped away ` +
         `(${data.recovered.nEmptyFeature} at corners / creases)\n`
       : `recovered: ${data.recovered.polys.length} faces, ${data.recovered.verts.length} vertices, ` +
@@ -531,7 +549,10 @@ function updateStats() {
 }
 
 // ---------- UI wiring ----------
-for (const id of ['shape', 'sampling', 'seed', 'sampled', 'tangent', 'mirrored', 'recMethod']) $(id).addEventListener('change', compute);
+for (const id of ['shape', 'sampling', 'seed', 'sampled', 'tangent', 'mirrored', 'recMethod', 'sScale']) $(id).addEventListener('change', compute);
+$('sScale').addEventListener('input', applyVisuals);
+for (const id of ['eTau', 'eMerge']) $(id).addEventListener('change', compute);
+$('eTau').addEventListener('input', applyVisuals);
 const reclip = () => { if (data.recovered?.clip) { data.recovered = clipPlanesNow(); buildRecovered(); updateStats(); } applyVisuals(); };
 for (const id of ['cParallel', 'cSimilar', 'cTurn', 'cMargin', 'cOnPlane']) $(id).addEventListener('input', reclip);
 for (const id of ['cFeatures', 'cRing2', 'cRing2All', 'cSplit', 'cUnion', 'cMutual']) $(id).addEventListener('change', reclip);

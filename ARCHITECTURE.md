@@ -42,14 +42,36 @@ Cost: O(n²) plane tests overall, which takes about 0.3 s for 1200 sites in Node
 
 ## Surface recovery (`recover.js`)
 
-`recoverSurface(sites, signs, owner, cells, planes, lambda)` builds a polygon mesh with one face per sample, lying in that sample's tangent plane. The power contour supplies the connectivity.
+### Structure: one face per tangent point, plus steps
+
+- **Super cells.** Sample `a` and its tangent point `t_a` together occupy a *super cell* `C_a` (the union of their two power cells). Inside `C_a` the boundary between the two cells is where their powers are equal, the tangent plane `P_a`, so the own face is exactly `F_a = P_a ∩ C_a`. Every other contour face lies on a wall between two super cells: a *step*, where the neighboring planes do not meet on the wall. Own faces never share an edge with each other (a corner of `F_a` has two cells of `a` and one each of two other owners), except in degenerate cases such as a sphere, where neighboring tangent planes meet exactly on the bisector.
+- **Eliminating the steps** means extending every own face in its plane until it meets its neighbors' planes. In the regular (dual) triangulation this is collapsing the edge between each sample and its tangent point; the result is a valid surface where the collapses satisfy the link condition, which fat steps (from big sample spheres) violate.
+- **Sphere scale `s`** ("Sphere scale" slider). Moving each sample toward its tangent point, `p(s) = t + s(p − t)` with weight `(s d)²`, keeps its sphere tangent at `t`, so the own face stays exactly in `P_a` for every `s`: only the steps change. As `s → 0` the super cells become the Voronoi cells of the tangent points and the steps become thin. The data (`t_a`, `n_a`, signs) is unchanged. Torus, 1500 uniform samples, owner pairs not at exactly 2 collapsed vertices: 3483 at `s = 1`, 203 at `s = 0.01`.
+- **Vertices are exact plane intersections** (`qefTruncated`): where three faces meet, `P_a ∩ P_b ∩ P_c`; with exact tangent data there is no noise to regularize. Only (nearly) dependent planes need care: eigenvalues of `Σ n nᵀ` below `tau · max` are dropped and the vertex keeps its contour position in those directions (coplanar flat faces; nearly coplanar normals, as along the torus's top and bottom circles, where exact intersections otherwise fly off by up to 12 units). "Dependent planes, log₁₀" sets `tau` (default 10⁻²).
+
+### Methods
+
+- **Contract contour regions** (`recoverSurface`, default): each step face is absorbed by one of its two own faces (the one with the nearer tangent point), so the regions tile the contour and neighboring faces share vertices by construction; vertices where ≥ 3 regions meet are plane intersections. Most robust topology.
+- **Extend own faces** (`extendOwnFaces`): no assignment of steps at all. Each own face's boundary gives its neighbors in order (each edge borders a step toward one neighbor `b`; a switch from `b` to `c` becomes the vertex `P_a ∩ P_b ∩ P_c`). Faces can disagree near four-owner junctions (flips); those are merged into one vertex ("Merge flipped junctions"). Leaves more cracks than the partition.
+
+Results, `s = 0.1`, `tau = 10⁻²` (rays from outside to an interior point that cross no face; areas vs true 8.88 / 6.91):
+
+| | torus, 1500 uniform | two spheres, 1500 uniform | torus, 1500 near surface |
+|---|---|---|---|
+| Contract contour regions | 0/400 rays, area 9.03, 26 vertices off > 0.02 | 0/400 (crease 0/600), area 6.95, max error 0.032 | 0 rays, 0 open edges, 0 off, area 8.96 |
+| Extend own faces | 2/400, area 8.99, 22 off | 0/400 (crease 0/600), area 6.99 | 0 rays, area 8.96 |
+| either at `s = 1` | 50/400 rays (extend) | — | — |
+
+### Contract contour regions (details)
+
+`recoverSurface(sites, signs, owner, cells, planes, lambda, tau)` builds a polygon mesh with one face per sample, lying in that sample's tangent plane. The power contour supplies the connectivity.
 
 - **Why the planes:** the face between sample `p_i` and its own tangent site `t_i` lies in the radical plane of sphere `i` and the point `t_i`. Since `t_i` is on that sphere, this is the sphere's tangent plane at `t_i`, which for an exact SDF is the surface's tangent plane. The face always exists and contains `t_i`: there both sites have power 0, and every other site has positive power.
 - **Owners:** every site has an owner, the sample it comes from (`data.owner`). Green faces (own faces) never meet three at a vertex, so they cannot give plane intersections by themselves; the other contour faces fill the gaps between them.
 - **Algorithm:**
   1. Weld the contour vertices (each cell computes its own copy) and partition the contour faces into one *region* per owner. A green face belongs to its owner. Any other face belongs to whichever of its two owners has the nearer tangent point (measured from the face centroid).
   2. Clean up so that every region is one connected piece: a stray component cut off from the region's green face goes to the face's other owner, or else to its most common neighboring region. A region enclosed by a single other region is merged into it. (Without this, about 1% of regions are not discs.)
-  3. Output vertices are the contour vertices where ≥ 3 regions meet. Each is placed by least squares on the tangent planes of those regions, `Σ (n_k·(x − t_k))² + λ|x − v|²`, where `v` is the contour vertex. `λ` (`REC_LAMBDA = 0.01`) keeps nearly parallel planes well-posed.
+  3. Output vertices are the contour vertices where ≥ 3 regions meet, placed where those regions' tangent planes meet (`qefTruncated`, above). With `tau = 0` the older placement is used: `Σ (n_k·(x − t_k))² + λ|x − v|²` with `λ = REC_LAMBDA = 0.01`, which pulls vertices off the planes toward the contour vertex `v`.
   4. Each region's polygon is its boundary loop on the contour (a chain of half-edges whose twin is in another region), keeping only the output vertices on it. A region whose boundary is not a single simple loop, or that has fewer than 3 output vertices, is reported in `badOwners` and leaves a hole.
 - **Why a partition:** an earlier version gave every non-green face to *both* of its owners. Regions then overlap, and on the torus or box an owner pair could share 3 to 20 vertices instead of 2, so there was no valid mesh.
 - **Results**, 1500 samples, `|sdf|` at the vertices:
