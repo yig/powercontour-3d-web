@@ -244,14 +244,14 @@
   // curvature for a curved one (the two-sphere crease). Smooth pairs never qualify, and neither does
   // a face point near a box edge: it is first-order off the adjacent face's plane.
   // κ_j: median normal turn per unit distance from j to neighbors with similar normals (< 20°).
-  function featureTies(planes, nbrs) {
+  function featureTies(planes, nbrs, o) {
     const kappa = new Map();
     for (const [j, pj] of planes) {
       const ks = [];
       for (const k of nbrs.get(j) || []) {
         const pk = planes.get(k), c = pj.normal[0] * pk.normal[0] + pj.normal[1] * pk.normal[1] + pj.normal[2] * pk.normal[2];
         const r = Math.sqrt(dist2(pj.point, pk.point));
-        if (c > Math.cos(20 * Math.PI / 180) && r > 1e-9) ks.push(Math.acos(Math.min(1, c)) / r);
+        if (c > Math.cos(o.similarDeg * Math.PI / 180) && r > 1e-9) ks.push(Math.acos(Math.min(1, c)) / r);
       }
       ks.sort((a, b) => a - b);
       kappa.set(j, ks.length ? ks[ks.length >> 1] : 0);
@@ -261,15 +261,24 @@
       const pi = planes.get(i), pj = planes.get(j), kj = kappa.get(j);
       const c = pi.normal[0] * pj.normal[0] + pi.normal[1] * pj.normal[1] + pi.normal[2] * pj.normal[2];
       const r = Math.sqrt(dist2(pi.point, pj.point));
-      if (Math.acos(Math.min(1, c)) <= 3 * kj * r + 10 * Math.PI / 180) return false;
+      if (Math.acos(Math.min(1, c)) <= o.turnFactor * kj * r + o.marginDeg * Math.PI / 180) return false;
       const f = pj.normal[0] * (pi.point[0] - pj.point[0]) + pj.normal[1] * (pi.point[1] - pj.point[1]) + pj.normal[2] * (pi.point[2] - pj.point[2]);
-      return Math.abs(f) <= kj * r * r + 1e-9;
+      return Math.abs(f) <= o.onPlaneFactor * kj * r * r + 1e-9;
     };
   }
 
-  function clipTangentPlanes(planes, nbrs, parallelDeg, ring2 = true) {
-    const cosPar = Math.cos(parallelDeg * Math.PI / 180), polys = [];
-    const tie = featureTies(planes, nbrs), feat = new Set();
+  // Options (CLIP_DEFAULTS): parallelDeg; features (false: no feature detection at all; an exact
+  // tie, t_i exactly on P_j, then falls back to the samples' signs); similarDeg, turnFactor, marginDeg,
+  // onPlaneFactor (featureTies); ring2 (clip feature points, or all points if ring2All, by their
+  // two-ring); splitFeature (split two points on the same feature, or exactly on each other's
+  // planes, by their Voronoi bisector).
+  // "Exactly on a plane": tangent points come from finite-difference gradients (error ~1e-10).
+  const EXACT = 1e-9;
+  const CLIP_DEFAULTS = { parallelDeg: 10, features: false, similarDeg: 20, turnFactor: 3, marginDeg: 10, onPlaneFactor: 1, ring2: true, ring2All: false, splitFeature: true };
+  function clipTangentPlanes(planes, nbrs, opts) {
+    const o = { ...CLIP_DEFAULTS, ...opts };
+    const cosPar = Math.cos(o.parallelDeg * Math.PI / 180), polys = [];
+    const tie = o.features ? featureTies(planes, nbrs, o) : () => false, feat = new Set();
     for (const [i] of planes) for (const j of nbrs.get(i) || []) if (tie(i, j)) { feat.add(i); break; }
     let nEmpty = 0, nEmptyFeature = 0;
     for (const [i, { point: t, normal: n, d }] of planes) {
@@ -277,8 +286,8 @@
       if (!N) continue;
       // A corner or crease point (t_i on a neighbor's non-parallel plane) may not see the planes
       // that should cut its supporting plane down; give it the two-ring of neighbors.
-      const feature = feat.has(i);
-      if (feature && ring2) { const N2 = new Set(N); for (const j of N) for (const k of nbrs.get(j) || []) if (k !== i) N2.add(k); N = N2; }
+      let feature = feat.has(i);
+      if ((feature && o.ring2) || o.ring2All) { const N2 = new Set(N); for (const j of N) for (const k of nbrs.get(j) || []) if (k !== i) N2.add(k); N = N2; }
       const a = Math.abs(n[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
       const u = [n[1] * a[2] - n[2] * a[1], n[2] * a[0] - n[0] * a[2], n[0] * a[1] - n[1] * a[0]];
       const ul = Math.hypot(u[0], u[1], u[2]); u[0] /= ul; u[1] /= ul; u[2] /= ul;
@@ -300,10 +309,13 @@
           // Keep the side of P_j that contains t_i. Only when t_i lies on P_j (a corner or crease
           // point) decide by convexity: f_i(t_j) < 0 means convex, else ask the sample signs.
           // On a feature, the feature point's sample tells convex (outside) from concave (inside).
-          const iOn = tie(i, j), jOn = tie(j, i), convex = iOn ? d > 0 : jOn ? dj > 0 : fji < 0;
+          const iOn = tie(i, j), jOn = tie(j, i);
+          if (Math.abs(fji) <= EXACT) feature = true; // exactly on a neighbor's plane: corner or edge point
+          const convex = iOn ? d > 0 : jOn ? dj > 0 : Math.abs(fji) > EXACT ? fji < 0 : d + dj > 0;
           // Two points on the same edge (or corner) have planes through the same line, which never
           // separate them along it; split them by their Voronoi bisector too.
-          if (iOn && jOn && dd > 1e-9) poly = clip2(poly, 2 * (dv[0] * u[0] + dv[1] * u[1] + dv[2] * u[2]), 2 * (dv[0] * w[0] + dv[1] * w[1] + dv[2] * w[2]), dd * dd);
+          const exactMutual = Math.abs(fji) <= EXACT && Math.abs(n[0] * dv[0] + n[1] * dv[1] + n[2] * dv[2]) <= EXACT;
+          if (o.splitFeature && ((iOn && jOn) || exactMutual) && dd > 1e-9) poly = clip2(poly, 2 * (dv[0] * u[0] + dv[1] * u[1] + dv[2] * u[2]), 2 * (dv[0] * w[0] + dv[1] * w[1] + dv[2] * w[2]), dd * dd);
           const sg = convex ? 1 : -1; // keep sg · f_j(x) ≤ 0, with x = t + p0 u + p1 w
           poly = clip2(poly, sg * (nj[0] * u[0] + nj[1] * u[1] + nj[2] * u[2]), sg * (nj[0] * w[0] + nj[1] * w[1] + nj[2] * w[2]), -sg * fji);
         }
@@ -316,7 +328,7 @@
     return { polys, nEmpty, nEmptyFeature };
   }
 
-  const api = { recoverSurface, mirroredSites, contourNeighbors, clipTangentPlanes };
+  const api = { recoverSurface, mirroredSites, contourNeighbors, clipTangentPlanes, CLIP_DEFAULTS };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Recover = api;
 })(this);

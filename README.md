@@ -12,7 +12,7 @@ You can also add one **tangent point** per sample: the closest point on the surf
 
 *Contract contour regions* builds a polygon mesh with one face per sample, lying in its tangent plane. The power contour supplies the connectivity. The face between a sample and its own tangent point lies in that tangent plane. Every other contour face is given to the nearer of its two samples, and the resulting regions on the contour become the faces of the new mesh. Each vertex is where three or more tangent planes meet, so sharp edges and corners (the box, the two-sphere crease) come out sharp. Red outlines mark holes, where a region is not a disc.
 
-*Clip tangent planes* uses only the tangent points: it finds neighbors with the power diagram of mirrored pairs `t ± δn` (check *Mirrored pairs* to see that contour), then clips each tangent plane by its neighbors' half-spaces. Tangent points on corners and creases get tiny faces (orange) and their planes cut the faces around them along the feature. See `ARCHITECTURE.md`.
+*Clip tangent planes* uses only the tangent points: it finds neighbors with the power diagram of mirrored pairs `t ± δn` (check *Mirrored pairs* to see that contour), then clips each tangent plane by its neighbors' half-spaces. Corners and edges come out with no feature detection: the face planes cut each other there, and tangent points on corners and edges (orange) get tiny faces. Curved creases can optionally be detected with thresholds (sliders). See `ARCHITECTURE.md`.
 
 ## Running
 
