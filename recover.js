@@ -272,8 +272,8 @@
   // onPlaneFactor (featureTies); ring2 (clip feature points, or all points if ring2All, by their
   // two-ring); splitFeature (split two points on the same feature, or exactly on each other's
   // planes, by their Voronoi bisector).
-  // "Exactly on a plane": tangent points come from finite-difference gradients (error ~1e-10).
-  const EXACT = 1e-9;
+  // "Exactly on a plane", up to rounding: tangent points and normals are exact (shapes.js closest).
+  const EXACT = 1e-12;
   const CLIP_DEFAULTS = { parallelDeg: 10, features: false, similarDeg: 20, turnFactor: 3, marginDeg: 10, onPlaneFactor: 1, ring2: true, ring2All: false, splitFeature: true };
   function clipTangentPlanes(planes, nbrs, opts) {
     const o = { ...CLIP_DEFAULTS, ...opts };

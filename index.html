@@ -28,6 +28,7 @@
 </style>
 <script src="vendor/three.js"></script>
 <script src="vendor/OrbitControls.js"></script>
+<script src="shapes.js"></script>
 <script src="powerdiagram.js"></script>
 <script src="recover.js"></script>
 </head>
@@ -112,50 +113,15 @@ const B = 1.5; // domain is [-B, B]^3
 const $ = id => document.getElementById(id);
 
 // ---------- SDFs ----------
+// SDF and closest point from shapes.js; meshes for the true-surface overlay.
 const shapes = {
-  sphere: {
-    sdf: ([x, y, z]) => Math.hypot(x, y, z) - 0.8,
-    meshes: () => [new THREE.Mesh(new THREE.SphereGeometry(0.8, 64, 32))],
-  },
-  box: {
-    sdf: ([x, y, z]) => {
-      const h = [0.7, 0.5, 0.4];
-      const q = [Math.abs(x) - h[0], Math.abs(y) - h[1], Math.abs(z) - h[2]];
-      return Math.hypot(Math.max(q[0], 0), Math.max(q[1], 0), Math.max(q[2], 0)) + Math.min(Math.max(q[0], q[1], q[2]), 0);
-    },
-    meshes: () => [new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.0, 0.8))],
-  },
-  torus: { // axis = z
-    sdf: ([x, y, z]) => Math.hypot(Math.hypot(x, y) - 0.75, z) - 0.3,
-    meshes: () => [new THREE.Mesh(new THREE.TorusGeometry(0.75, 0.3, 32, 96))],
-  },
-  twospheres: {
-    // min(dL, dR) is exact outside but not inside: there the nearest surface point may be on the
-    // crease circle, or on the part of a sphere that is not buried in the other one.
-    sdf: ([x, y, z]) => {
-      const R = 0.55, cx = 0.45, rc = Math.sqrt(R * R - cx * cx);
-      const dl = Math.hypot(x + cx, y, z) - R, dr = Math.hypot(x - cx, y, z) - R;
-      if (dl >= 0 && dr >= 0) return Math.min(dl, dr);
-      const crease = Math.hypot(x, Math.hypot(y, z) - rc);
-      // Distance to sphere c's exposed cap, if the nearest point on that sphere is on it.
-      const cap = (c, d) => { const qx = c + R * (x - c) / (Math.hypot(x - c, y, z) || 1); return Math.sign(c) * qx >= 0 ? Math.abs(d) : crease; };
-      return -Math.min(cap(-cx, dl), cap(cx, dr), crease);
-    },
-    meshes: () => [-0.45, 0.45].map(cx => {
-      const m = new THREE.Mesh(new THREE.SphereGeometry(0.55, 64, 32)); m.position.x = cx; return m;
-    }),
-  },
+  sphere: { ...Shapes.sphere, meshes: () => [new THREE.Mesh(new THREE.SphereGeometry(0.8, 64, 32))] },
+  box: { ...Shapes.box, meshes: () => [new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.0, 0.8))] },
+  torus: { ...Shapes.torus, meshes: () => [new THREE.Mesh(new THREE.TorusGeometry(0.75, 0.3, 32, 96))] },
+  twospheres: { ...Shapes.twospheres, meshes: () => [-0.45, 0.45].map(cx => {
+    const m = new THREE.Mesh(new THREE.SphereGeometry(0.55, 64, 32)); m.position.x = cx; return m;
+  }) },
 };
-
-function gradient(sdf, p) {
-  const h = 1e-5, g = [0, 0, 0];
-  for (let k = 0; k < 3; k++) {
-    const a = p.slice(), b = p.slice(); a[k] += h; b[k] -= h;
-    g[k] = (sdf(a) - sdf(b)) / (2 * h);
-  }
-  const l = Math.hypot(g[0], g[1], g[2]) || 1;
-  return [g[0] / l, g[1] / l, g[2] / l];
-}
 
 // ---------- Sampling ----------
 function mulberry32(a) {
@@ -252,8 +218,8 @@ function compute() {
   inputs.forEach((p, k) => {
     const d = shape.sdf(p);
     if (Math.abs(d) < 1e-9) return; // already on the surface: no tangent plane
-    const g = gradient(shape.sdf, p);
-    planes.set(k, { point: [p[0] - d * g[0], p[1] - d * g[1], p[2] - d * g[2]], normal: g, d });
+    const t = shape.closest(p); // exact: the normal is the unit vector from t to p
+    planes.set(k, { point: t, normal: [(p[0] - t[0]) / d, (p[1] - t[1]) / d, (p[2] - t[2]) / d], d });
   });
   if ($('sampled').checked) {
     inputs.forEach((p, k) => {
