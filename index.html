@@ -55,7 +55,10 @@
       <option value="box">Box</option>
       <option value="torus" selected>Torus</option>
       <option value="twospheres">Two spheres (union)</option>
+      <option value="obj">OBJ file…</option>
     </select></div>
+  <div class="row" id="objRow" style="display:none"><label>Mesh</label><span id="objName" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#b8bec9"></span>
+    <button type="button" id="objLoad">Load…</button><input type="file" id="objFile" accept=".obj" style="display:none"></div>
   <div class="row"><label>Sampling</label>
     <select id="sampling">
       <option value="random">Uniform random</option>
@@ -137,7 +140,28 @@ const shapes = {
   twospheres: { ...Shapes.twospheres, meshes: () => [-0.45, 0.45].map(cx => {
     const m = new THREE.Mesh(new THREE.SphereGeometry(0.55, 64, 32)); m.position.x = cx; return m;
   }) },
+  obj: null, // set by loadOBJ
 };
+
+// ---------- OBJ meshes ----------
+// The mesh is centered and scaled to fit [-1, 1]^3. Its SDF is exact for the triangles; the sign
+// assumes a closed, consistently oriented mesh.
+function loadOBJ(text, name) {
+  let m;
+  try { m = Shapes.fromOBJ(text, 1); } catch (e) { alert(`Could not load ${name}: ${e.message}`); return false; }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(m.positions.flat(), 3));
+  geo.setIndex(m.triangles.flat());
+  geo.computeVertexNormals();
+  shapes.obj = { sdf: m.sdf, closest: m.closest, meshes: () => [new THREE.Mesh(geo)] };
+  $('objName').textContent = `${name} (${m.triangles.length} triangles)`;
+  $('objName').title = name;
+  $('shape').value = prevShape = 'obj';
+  showObjRow(); compute();
+  return true;
+}
+function showObjRow() { $('objRow').style.display = $('shape').value === 'obj' ? '' : 'none'; }
+function readOBJFile(file) { if (file) file.text().then(t => loadOBJ(t, file.name)); }
 
 // ---------- Sampling ----------
 function mulberry32(a) {
@@ -559,7 +583,7 @@ function updateStats() {
 // ---------- Help pop-ups ----------
 // One text per control; a "?" button after each control shows it. README.md has the same texts.
 const HELP = {
-  shape: 'The surface: a sphere, a box, a torus, or the union of two spheres (which has a concave crease where they meet). Each has an exact SDF and closest point (shapes.js).',
+  shape: 'The surface: a sphere, a box, a torus, the union of two spheres (which has a concave crease where they meet), or a triangle mesh from an OBJ file. Each has an exact SDF and closest point (shapes.js). An OBJ is centered and scaled to fit [−1, 1]³; you can also drop one onto the page. Its sign assumes a closed, consistently oriented mesh.',
   sampling: 'How sample points are placed in the box [−1.5, 1.5]³: uniform random, a jittered or regular grid, or uniform random keeping only points with |d| < 0.1.',
   npts: 'Number of sample points. The power diagram costs O(n²): 1500 points take a couple of seconds.',
   seed: 'Random seed for the sampling.',
@@ -617,7 +641,16 @@ document.addEventListener('click', e => { if (helpOpen && !helpPop.contains(e.ta
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeHelp(); });
 
 // ---------- UI wiring ----------
-for (const id of ['shape', 'sampling', 'seed', 'sampled', 'tangent', 'mirrored', 'recMethod', 'sScale']) $(id).addEventListener('change', compute);
+let prevShape = $('shape').value;
+$('shape').addEventListener('change', () => {
+  if ($('shape').value === 'obj' && !shapes.obj) { $('shape').value = prevShape; $('objFile').click(); return; }
+  prevShape = $('shape').value; showObjRow(); compute();
+});
+$('objLoad').addEventListener('click', () => $('objFile').click());
+$('objFile').addEventListener('change', e => { readOBJFile(e.target.files[0]); e.target.value = ''; });
+document.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('drop', e => { e.preventDefault(); readOBJFile(e.dataTransfer.files[0]); });
+for (const id of ['sampling', 'seed', 'sampled', 'tangent', 'mirrored', 'recMethod', 'sScale']) $(id).addEventListener('change', compute);
 $('sScale').addEventListener('input', applyVisuals);
 for (const id of ['eTau', 'eTrust', 'eMerge']) $(id).addEventListener('change', compute);
 for (const id of ['eTau', 'eTrust']) $(id).addEventListener('input', applyVisuals);

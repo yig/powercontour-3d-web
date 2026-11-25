@@ -9,7 +9,7 @@ Everything is loaded as classic `<script>` tags, because browsers refuse to load
 | File | Role |
 |---|---|
 | `powerdiagram.js` | Pure geometry: the 3D power diagram. No three.js. Runs in the browser (global `PowerDiagram`) and in Node (`require`). |
-| `shapes.js` | The test shapes: exact `sdf(p)` and analytic `closest(p)`. No three.js. Browser global `Shapes`, Node `require`. `index.html` adds the overlay meshes. |
+| `shapes.js` | The test shapes: exact `sdf(p)` and analytic `closest(p)`. No three.js. Browser global `Shapes`, Node `require`. `index.html` adds the overlay meshes. `Shapes.fromOBJ(text, size)` makes a shape from a triangle mesh: OBJ parsing with vertex welding, normalization to [−size, size], a median-split BVH for the exact closest point (Ericson's point–triangle test), and the sign from the angle-weighted pseudonormal of the closest face, edge or vertex (Bærentzen & Aanæs 2005). It also returns `positions` and `triangles` for the overlay. |
 | `recover.js` | Pure geometry: recovers a surface by intersecting tangent planes, using the power contour's connectivity. No three.js. Browser global `Recover`, Node `require`. |
 | `index.html` | UI and rendering: SDFs, sampling, building sites, three.js scene, controls. All code is in one inline `<script type="module">`, which uses the global `THREE`. |
 | `vendor/three.js`, `vendor/OrbitControls.js` | three.js r170, converted from its ES modules into classic scripts that define `window.THREE` and `THREE.OrbitControls`. Generated; do not edit. |
@@ -99,7 +99,7 @@ The second method ("Clip tangent planes") uses only the tangent data (`t_i`, `n_
 ## Viewer (`index.html`)
 
 - **Domain** is `[−B, B]³` with `B = 1.5`, used both for sampling and for the diagram's bounding box.
-- **`shapes`** maps a name to `{ sdf(p), meshes() }`. `meshes()` returns three.js geometry for the optional true-surface overlay. To add a shape, add one entry here and one `<option>`.
+- **`shapes`** maps a name to `{ sdf(p), closest(p), meshes() }`. `shapes.obj` is filled in by `loadOBJ(text, name)` from the file picker or a drop on the page; choosing "OBJ file…" before any mesh is loaded opens the picker. `meshes()` returns three.js geometry for the optional true-surface overlay. To add a shape, add one entry here and one `<option>`.
 - **Sampling** (`samplePoints`) is uniform random, jittered grid, regular grid, or near surface (uniform random, keeping points with `|d| < BAND = 0.1`), using the seeded PRNG `mulberry32`. The regular grid gets a jitter of about 1e-6 to avoid degenerate cases. Near-surface sampling puts the point budget where the surface is; the two-sphere crease is only recovered well with it.
 - **Two-sphere SDF:** `min(dL, dR)` is exact outside the union but not inside. Inside, the nearest surface point may be on the crease circle, or on the exposed cap of a sphere, so the SDF computes those distances. With the plain `min`, tangent points of interior samples landed on sphere parts buried inside the other sphere.
 - **Pipeline:** `compute()` samples points, builds the sites, runs `computePowerDiagram`, stores everything in `data`, then calls `rebuildAll()`. Changing shape, sampling, point count, seed or either site checkbox recomputes. With both off there are no sites and nothing is drawn.

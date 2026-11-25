@@ -24,7 +24,8 @@ Every control has a **?** button in the panel that shows the same explanation as
 
 | Group | Control | Effect |
 |---|---|---|
-| Input | Shape | The surface: a sphere, a box, a torus, or the union of two spheres (which has a concave crease where they meet). Each has an exact SDF and closest point (`shapes.js`). |
+| Input | Shape | The surface: a sphere, a box, a torus, the union of two spheres (which has a concave crease where they meet), or a triangle mesh from an OBJ file. Each has an exact SDF and closest point (`shapes.js`). |
+| | Mesh: Load… | Shown for "OBJ file…". Loads a `.obj` (you can also drop one onto the page). It is centered and scaled so its longest side spans [−1, 1]. Polygons are fan-triangulated and duplicate vertices merged. The distance is exact for the triangles; the sign uses angle-weighted pseudonormals, so the mesh should be closed and consistently oriented. |
 | | Sampling | How sample points are placed in the box `[−1.5, 1.5]³`: uniform random, a jittered or regular grid, or uniform random keeping only points with `\|d\| < 0.1`. |
 | | Points | Number of sample points. The power diagram costs O(n²): 1500 points take a couple of seconds. |
 | | Seed | Random seed for the sampling. |
