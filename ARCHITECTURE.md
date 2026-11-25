@@ -14,6 +14,7 @@ Everything is loaded as classic `<script>` tags, because browsers refuse to load
 | `index.html` | UI and rendering: SDFs, sampling, building sites, three.js scene, controls. All code is in one inline `<script type="module">`, which uses the global `THREE`. |
 | `vendor/three.js`, `vendor/OrbitControls.js` | three.js r170, converted from its ES modules into classic scripts that define `window.THREE` and `THREE.OrbitControls`. Generated; do not edit. |
 | `vendor/update-three.mjs` | Regenerates the files above from jsdelivr: `node vendor/update-three.mjs [version]`. It stops with an error if a three.js version no longer has the single-file, import-free form it expects. |
+| `RECOVERY.md` | The structure of the contour of samples plus tangent points, the two contraction methods, and the choice of sphere scale and `tau`. |
 | `AGENTS.md` | The original spec. |
 
 ## Math
@@ -41,6 +42,8 @@ Everything is loaded as classic `<script>` tags, because browsers refuse to load
 Cost: O(n²) plane tests overall, which takes about 0.3 s for 1200 sites in Node. Each face is stored in both of its cells, without shared vertices.
 
 ## Surface recovery (`recover.js`)
+
+See also `RECOVERY.md`, which explains the structure and the contraction methods in more depth, with experiments.
 
 ### Structure: one face per tangent point, plus steps
 
