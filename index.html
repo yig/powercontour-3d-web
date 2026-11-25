@@ -93,7 +93,8 @@
       <option value="clip">Clip tangent planes</option>
     </select></div>
   <div id="extendOpts">
-    <div class="row"><label>Dependent planes, log₁₀</label><input type="range" id="eTau" min="-8" max="-0.5" step="0.1" value="-2"><span class="val" id="eTau-v"></span></div>
+    <div class="row"><label>Dependent planes, log₁₀</label><input type="range" id="eTau" min="-14" max="-0.5" step="0.5" value="-12"><span class="val" id="eTau-v"></span></div>
+    <div class="row"><label>Trust radius × spacing</label><input type="range" id="eTrust" min="0.5" max="10" step="0.1" value="2"><span class="val" id="eTrust-v"></span></div>
     <label class="check" id="eMergeRow"><input type="checkbox" id="eMerge" checked> Merge flipped junctions</label>
   </div>
   <div id="clipOpts">
@@ -219,7 +220,7 @@ function disposeGroup(obj) {
   obj.traverse(o => { o.geometry?.dispose(); (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => m?.dispose()); });
 }
 
-const extendOpts = () => ({ tau: 10 ** +$('eTau').value, maxJunction: $('eMerge').checked ? 4 : 3 });
+const extendOpts = () => ({ tau: 10 ** +$('eTau').value, trust: +$('eTrust').value >= 10 ? Infinity : +$('eTrust').value, maxJunction: $('eMerge').checked ? 4 : 3 });
 // The clip options only re-clip; the diagrams are not recomputed.
 const clipOpts = () => ({ parallelDeg: +$('cParallel').value, features: $('cFeatures').checked, similarDeg: +$('cSimilar').value,
   turnFactor: +$('cTurn').value, marginDeg: +$('cMargin').value, onPlaneFactor: +$('cOnPlane').value,
@@ -268,7 +269,7 @@ function compute() {
     data.recovered = Recover.extendOwnFaces(sites, signs, owner, cells, planes, extendOpts());
   } else if (method === 'regions' && contractible) {
     // Intersects the tangent planes of the regions that the sample-to-own-tangent faces grow into.
-    data.recovered = Recover.recoverSurface(sites, signs, owner, cells, planes, REC_LAMBDA, extendOpts().tau);
+    data.recovered = Recover.recoverSurface(sites, signs, owner, cells, planes, REC_LAMBDA, extendOpts().tau, extendOpts().trust);
   } else if (method === 'clip') {
     // Connectivity from the mirrored-pair diagram (reused if that is exactly what is displayed).
     const onlyMirror = !$('sampled').checked && !$('tangent').checked && $('mirrored').checked;
@@ -535,7 +536,7 @@ function applyVisuals() {
   $('clipOpts').style.display = $('recMethod').value === 'clip' ? '' : 'none';
   $('extendOpts').style.display = ['extend', 'regions'].includes($('recMethod').value) ? '' : 'none';
   $('eMergeRow').style.display = $('recMethod').value === 'extend' ? '' : 'none';
-  for (const id of ['npts', 'sScale', 'eTau', 'sphOp', 'pcOp', 'surfOp', 'sliceZ', 'cParallel', 'cSimilar', 'cTurn', 'cMargin', 'cOnPlane']) $(id + '-v').textContent = (+$(id).value).toString().slice(0, 5);
+  for (const id of ['npts', 'sScale', 'eTau', 'eTrust', 'sphOp', 'pcOp', 'surfOp', 'sliceZ', 'cParallel', 'cSimilar', 'cTurn', 'cMargin', 'cOnPlane']) $(id + '-v').textContent = (+$(id).value).toString().slice(0, 5);
 }
 
 function updateStats() {
@@ -572,7 +573,8 @@ const HELP = {
   pcEdges: 'Outline the contour faces.',
   pcColorBy: 'Uniform gold, or color each face by the kinds of sites it separates, with a legend and counts. Green faces (a sample and its own tangent point) lie exactly in the tangent plane; the others are steps between them.',
   recMethod: 'Build a surface whose faces lie in the tangent planes. Contract contour regions: give each other contour face to one of its two own faces, and intersect the tangent planes where regions meet. Extend own faces: extend each own face from its own boundary, without assigning the other faces. Both need sampled + tangent points only. Clip tangent planes: clip each tangent plane by its neighbors’ planes (any sites). See RECOVERY.md.',
-  eTau: 'Vertices are exact intersections of the tangent planes that meet there, except where the planes are (nearly) dependent: eigenvalues of Σ n nᵀ below 10^value × the largest are dropped, and the vertex keeps its contour position in those directions. −2 treats planes within about 11° as one plane. Lower values keep more intersections exact but let nearly dependent planes send vertices far away; this is not a precision setting (see RECOVERY.md).',
+  eTau: 'Planes count as dependent (e.g. coplanar faces of the box) when eigenvalues of Σ n nᵀ fall below 10^value × the largest; the vertex then keeps its contour position in those directions. With the trust radius on, this only needs to catch exact degeneracies: −12 is numerical precision. Without it (trust at 10 = off), about −2 is needed to stop nearly dependent planes from sending vertices far away.',
+  eTrust: 'A tangent plane is only accurate within about one sample spacing of its tangent point. A vertex may move at most this many spacings (the distance from its contour position to the farthest of its tangent points) away from its contour position: it is the exact intersection of its planes if that is near, else the nearest point on the line where the two best-determined planes meet, else on one plane. 2 keeps box corners exact and removes far-away vertices on curved shapes. 10 = off.',
   eMerge: 'Extend own faces: where four owners meet at nearly one point and their faces disagree about which diagonal is an edge, merge the junction into one vertex where all four planes meet. Off: such junctions leave cracks.',
   cParallel: 'Clip tangent planes: neighbors whose normals differ by less than this angle are split by their Voronoi bisector instead of by the line where their planes meet.',
   cUnion: 'Clip tangent planes: across a concave crease a face must be above at least one plane from the other side, not all of them, so concave constraints are combined by union (overlapping pieces).',
@@ -617,8 +619,8 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeHelp();
 // ---------- UI wiring ----------
 for (const id of ['shape', 'sampling', 'seed', 'sampled', 'tangent', 'mirrored', 'recMethod', 'sScale']) $(id).addEventListener('change', compute);
 $('sScale').addEventListener('input', applyVisuals);
-for (const id of ['eTau', 'eMerge']) $(id).addEventListener('change', compute);
-$('eTau').addEventListener('input', applyVisuals);
+for (const id of ['eTau', 'eTrust', 'eMerge']) $(id).addEventListener('change', compute);
+for (const id of ['eTau', 'eTrust']) $(id).addEventListener('input', applyVisuals);
 const reclip = () => { if (data.recovered?.clip) { data.recovered = clipPlanesNow(); buildRecovered(); updateStats(); } applyVisuals(); };
 for (const id of ['cParallel', 'cSimilar', 'cTurn', 'cMargin', 'cOnPlane']) $(id).addEventListener('input', reclip);
 for (const id of ['cFeatures', 'cRing2', 'cRing2All', 'cSplit', 'cUnion', 'cMutual']) $(id).addEventListener('change', reclip);

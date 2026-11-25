@@ -59,7 +59,7 @@
   // planes: owner -> { point, normal } (the tangent point and the unit SDF gradient).
   // lambda: pull toward the contour vertex; keeps nearly parallel planes well-posed.
   // Returns { verts, anchors, vertOwners, polys: [{ owner, normal, verts }], badOwners, nRegions }.
-  function recoverSurface(sites, signs, owner, cells, planes, lambda, tau = 0) {
+  function recoverSurface(sites, signs, owner, cells, planes, lambda, tau = 0, trust = Infinity) {
     // 1. Contour faces (oriented from the + side), welded, each labeled with the owning region.
     const welder = makeWelder(), faces = [];
     cells.forEach((cf, i) => {
@@ -147,7 +147,8 @@
           b[r] += n[r] * c;
         }
       }
-      outId[k] = verts.length; verts.push(tau ? qefTruncated(A, b, v, tau) : solve3(A, b)); anchors.push(v); vertOwners.push([...ls]);
+      const x = tau ? qefTruncated(A, b, v, tau, trustRadius(v, ls, planes, trust)) : solve3(A, b);
+      outId[k] = verts.length; verts.push(x); anchors.push(v); vertOwners.push([...ls]);
     });
 
     // 5. Boundary of each region: half-edges whose twin belongs to another region (or is missing).
@@ -196,7 +197,7 @@
   // a flat face, the vertex stays at its contour position projected onto them (truncated QEF).
   // A triple that is not seen from all three faces leaves a crack; hole edges report it.
   function extendOwnFaces(sites, signs, owner, cells, planes, opts) {
-    const o = { tau: 1e-2, maxJunction: 4, ...opts };
+    const o = { tau: 1e-2, maxJunction: 4, trust: Infinity, ...opts };
     const welder = makeWelder();
     const triples = new Map(); // "a,b,c" -> { owners, sum, n }
     const rings = [];          // per own face: { owner, keys: [triple key or null], anchors }
@@ -271,7 +272,7 @@
         const { normal: nn, point: t } = planes.get(ow), c = nn[0] * t[0] + nn[1] * t[1] + nn[2] * t[2];
         for (let p = 0; p < 3; p++) { for (let q = 0; q < 3; q++) A[p][q] += nn[p] * nn[q]; r[p] += nn[p] * c; }
       }
-      idOf.set(g, verts.length); verts.push(qefTruncated(A, r, m, o.tau)); anchors.push(m); vertOwners.push(ows);
+      idOf.set(g, verts.length); verts.push(qefTruncated(A, r, m, o.tau, trustRadius(m, ows, planes, o.trust))); anchors.push(m); vertOwners.push(ows);
     }
     // Faces: the ring of switch vertices (merged junctions collapse repeats); box corners keep their
     // contour position.
@@ -314,16 +315,33 @@
   }
   // Minimize Σ (n·x − c)² near m: x = m + pinv(A)(r − A m), dropping eigenvalues below tau · max.
   // Independent planes: their exact intersection. Dependent ones: m projected onto them.
-  function qefTruncated(A, r, m, tau) {
+  //
+  // Trust region (rho): a tangent plane is only accurate within about one sample spacing of its
+  // tangent point, so the vertex may not leave the ball of radius rho around m. The eigendirections
+  // are added from the best determined (largest eigenvalue) down, and the solution uses the most
+  // that keep it within rho: the exact intersection of the planes if it is near, else the nearest
+  // point on the line where the two best-determined planes meet, else on their average plane, else
+  // m. The corrections along different eigendirections are orthogonal, so the distance only grows.
+  function qefTruncated(A, r, m, tau, rho = Infinity) {
     const { vals, vecs } = eig3(A), lmax = Math.max(...vals);
     const res = [0, 1, 2].map(i => r[i] - (A[i][0] * m[0] + A[i][1] * m[1] + A[i][2] * m[2]));
     const x = m.slice();
-    for (let e = 0; e < 3; e++) {
-      if (vals[e] <= tau * lmax) continue;
+    let d2 = 0;
+    for (const e of [0, 1, 2].sort((p, q) => vals[q] - vals[p])) {
+      if (vals[e] <= tau * lmax) break;
       const u = [vecs[0][e], vecs[1][e], vecs[2][e]], coef = (u[0] * res[0] + u[1] * res[1] + u[2] * res[2]) / vals[e];
+      if (d2 + coef * coef > rho * rho) break;
+      d2 += coef * coef;
       x[0] += coef * u[0]; x[1] += coef * u[1]; x[2] += coef * u[2];
     }
     return x;
+  }
+  // Trust radius at m: trust × the distance from m to the farthest of the planes' tangent points.
+  function trustRadius(m, owners, planes, trust) {
+    if (!(trust < Infinity)) return Infinity;
+    let far = 0;
+    for (const o of owners) far = Math.max(far, Math.sqrt(dist2(m, planes.get(o).point)));
+    return trust * far;
   }
 
   // ---------- Clipped tangent planes ----------
