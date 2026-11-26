@@ -600,7 +600,7 @@ function updateStats() {
 function patchLine(r) {
   const t = r.patchStats;
   return `patches: ${r.polys.length} faces, ${r.verts.length} vertices, ${r.nHoleEdges} hole edges\n` +
-    `${t.patches} step patches (${t.partitioned} partitioned), ${t.junctions} junctions; loops ${t.convex} convex, ${t.concave} concave, ` +
+    `${t.patches} step patches (${t.partitioned} by restricted Delaunay), ${t.junctions} junctions; loops ${t.convex} convex, ${t.concave} concave, ` +
     `${t.saddle} saddle, ${t.flat} flat` + (t.nonManifoldEdges ? `; ${t.nonManifoldEdges} non-manifold edges` : '') + (t.facelessOwners ? `; ${t.facelessOwners} tangent points without a face` : '') + '\n';
 }
 

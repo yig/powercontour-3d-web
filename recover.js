@@ -258,7 +258,7 @@
     }
     topo.pieces = pieces.length;
     topo.splitRegions = [...perLabel.values()].filter(n => n > 1).length;
-    return { verts, anchors, vertOwners, polys, badOwners, nRegions: perLabel.size, topo };
+    return { verts, anchors, vertOwners, polys, badOwners, nRegions: perLabel.size, topo, contour: { pts, faces, heFace } };
   }
 
   // ---------- Extended own faces ----------
@@ -599,24 +599,16 @@
   // Contour vertices where three or more own faces meet with no step between them are loops too.
   // The output faces are the duals: each own face's polygon is the cycle of triangles around it.
   const PATCH_DEFAULTS = { tau: 1e-12, trust: 2 };
-  const DP_MAX = 24; // longer loops, and patches with holes, are partitioned instead
+  const DP_MAX = 24; // longer loops, and patches with holes, keep the partition's junctions
   function triangulatePatches(sites, signs, owner, cells, planes, opts) {
     const o = { ...PATCH_DEFAULTS, ...opts };
-    // 1. Contour faces from the + side, welded; own faces are green.
-    const welder = makeWelder(), faces = [];
-    cells.forEach((cf, i) => {
-      if (signs[i] <= 0) return;
-      for (const f of cf) {
-        const j = f.label;
-        if (j < 0 || signs[j] >= 0) continue;
-        const a = owner[i], b = owner[j];
-        if (!planes.get(a) || !planes.get(b)) continue;
-        const vs = f.verts.map(p => welder.id(p)).filter((u, k, w) => u !== w[(k + 1) % w.length]);
-        if (vs.length >= 3) faces.push({ owners: [a, b], green: a === b, vs });
-      }
-    });
-    const pts = welder.pts, heFace = new Map();
-    faces.forEach((F, fi) => F.vs.forEach((u, k) => heFace.set(`${u},${F.vs[(k + 1) % F.vs.length]}`, fi)));
+    // 1. The contour, welded and partitioned as in Contract contour regions (each step labeled with
+    //    the nearer of its two owners, then cleaned up). The partition is the restricted Voronoi
+    //    diagram of the tangent points; its junctions are the Delaunay triangles used wherever the
+    //    planes do not decide (flat patches, patches with holes, long loops).
+    const base = recoverSurface(sites, signs, owner, cells, planes, 0, o.tau, o.trust);
+    const { pts, faces, heFace } = base.contour;
+    for (const F of faces) F.owners = [F.label, F.label];
     const across = (u, v) => heFace.get(`${v},${u}`); // the face on the other side of half-edge u -> v
 
     // 2. Step patches and their boundary loops, as cyclic sequences of own-face owners. Each
@@ -649,13 +641,16 @@
         do { const [v, g] = out.get(u).pop(); ring.push({ u, v, g }); u = v; } while (out.get(u)?.length && u !== u0);
         if (u === u0) rings.push(ring);
       }
-      // Owner sequence of each ring: the own face across each boundary edge, and at each boundary
-      // vertex every own face passed when rotating around it outside the patch (own faces that touch
-      // the patch only at a corner). Consecutive repeats are merged into one position.
-      const seqs = rings.map(ring => {
+      P.rings = rings;
+    });
+    // Owner sequence of a ring: the own face across each boundary edge, and at each boundary vertex
+    // every labeled face passed when rotating around it outside the patch: own faces that touch the
+    // patch only at a corner, and (once the triangulated patches are known) steps of partitioned
+    // patches that touch it there, with their labels. Consecutive repeats are merged.
+    const ringSeq = (pi, ring, withSteps) => {
         const items = [];
         ring.forEach((e, k) => {
-          if (e.g !== undefined && faces[e.g].green) items.push({ ow: faces[e.g].owners[0], at: e.u, at2: e.v });
+          if (e.g !== undefined && faces[e.g].green) items.push({ ow: faces[e.g].label, at: e.u, at2: e.v });
           const e2 = ring[(k + 1) % ring.length];
           if (e.g === undefined || e2.g === undefined || e.g === e2.g) return;
           for (const way of [0, 1]) { // rotate around v from e.g to e2.g; the side that avoids the patch
@@ -668,7 +663,7 @@
               passed.push(H); G = H;
             }
             if (!ok) continue;
-            for (const H of passed) if (faces[H].green) items.push({ ow: faces[H].owners[0], at: e.v, at2: e.v });
+            for (const H of passed) if (faces[H].green || (withSteps && !patches[patchOf[H]]?.dp)) items.push({ ow: faces[H].label, at: e.v, at2: e.v });
             break;
           }
         });
@@ -679,30 +674,25 @@
         }
         if (seq.length > 1 && seq[0].ow === seq[seq.length - 1].ow) { seq[0].enter = seq[seq.length - 1].enter; seq.pop(); }
         return seq;
-      }).filter(s => s.length >= 2);
-      // A single loop of at most DP_MAX own faces is triangulated from its planes. Otherwise (a patch
-      // with holes, such as a flat side of the box with its own faces as islands, or a long crease
-      // strip) the patch is partitioned like Contract contour regions: each step goes to the nearest
-      // tangent point among the faces around the patch, and its vertices are junctions of the labels.
-      if (seqs.length === 1 && rings.length === 1 && seqs[0].length <= DP_MAX) { if (seqs[0].length >= 3) loops.push({ seq: seqs[0], patch: pi }); return; }
-      const around = new Set(); rings.forEach(ring => ring.forEach(e => { if (e.g !== undefined && faces[e.g].green) around.add(faces[e.g].owners[0]); }));
-      seqs.forEach(sq => sq.forEach(q => around.add(q.ow)));
-      if (!around.size) return;
-      stats0.partitioned++;
-      for (const fi of P.faces) {
-        const vs = faces[fi].vs, c = [0, 1, 2].map(i => vs.reduce((s, u) => s + pts[u][i], 0) / vs.length);
-        let best = -1, bd = Infinity;
-        for (const o of around) { const d = dist2(c, planes.get(o).point); if (d < bd) { bd = d; best = o; } }
-        faces[fi].label = best;
-      }
+    };
+    // A single loop of 3 to DP_MAX own faces is triangulated from its planes. Otherwise (a patch with
+    // holes, such as a flat side of the box with its own faces as islands, or a long loop) the patch
+    // keeps the partition's labels, and its vertices are the partition's junctions.
+    patches.forEach((P, pi) => {
+      const seqs = P.rings.map(ring => ringSeq(pi, ring, false)).filter(q => q.length >= 2);
+      if (seqs.length === 1 && P.rings.length === 1 && seqs[0].length >= 3 && seqs[0].length <= DP_MAX) P.dp = true;
+      else stats0.partitioned++;
     });
-    // Junctions: contour vertices around which every face is labeled (an own face, or a step of a
-    // partitioned patch) and >= 3 labels meet.
-    const label = F => F.green ? F.owners[0] : F.label;
+    patches.forEach((P, pi) => { if (P.dp) loops.push({ seq: ringSeq(pi, P.rings[0], true), patch: pi }); });
+    const inDP = new Uint8Array(pts.length);
+    patches.forEach(P => { if (P.dp) for (const fi of P.faces) for (const u of faces[fi].vs) inDP[u] = 1; });
+    // Junctions: contour vertices outside the triangulated patches where >= 3 labels meet (own faces
+    // meeting with no step between them, and the junctions of the partition).
+    const label = F => F.label;
     const incident = pts.map(() => []);
     faces.forEach((F, fi) => F.vs.forEach((u, k) => incident[u].push([fi, k])));
     incident.forEach((inc, v) => {
-      if (inc.length < 3 || inc.some(([fi]) => label(faces[fi]) === undefined)) return;
+      if (inc.length < 3 || inDP[v]) return;
       const ows = new Set(inc.map(([fi]) => label(faces[fi])));
       if (ows.size < 3) return;
       // Rotate around v: from face F, cross its edge v -> next to the following face.
@@ -780,7 +770,7 @@
         for (const [p, q] of [[i, j], [j, l], [i, l]]) if ((q - p) % k !== 1 && (p - q + k) % k !== 1 && loopEdges.has(pairKey(seq[p].ow, seq[q].ow))) forbid += FORBID;
         return { x: qefTruncated(A, r, anc, o.tau, trustRadius(anc, os, planes, o.trust)), anchor: anc, owners: os, forbid };
       };
-      if (k > DP_MAX) { for (let l = 1; l + 1 < k; l++) { const t = vertexOf(0, l, l + 1); if (t) tris.push(t); } continue; } // a junction of many labels: fan
+      if (k > DP_MAX) { for (let l = 1; l + 1 < k; l++) { const t = vertexOf(0, l, l + 1); if (t) tris.push(t); } continue; } // a junction of very many labels: fan
       const V = new Map(), vert = (i, l, j) => { const key = `${i},${l},${j}`; if (!V.has(key)) V.set(key, vertexOf(i, l, j)); return V.get(key); };
       // Minimum-cost triangulation of the polygon 0 .. k-1 (Klincsek's O(k^3) dynamic program), once
       // per reading. For a saddle this is the decider: a reading with at most two groups against at least
@@ -811,33 +801,47 @@
     //    and the dynamic program keeps loop order, so each triangle (a, b, c) is oriented; around a it
     //    says "after neighbor b comes c". Following that order gives consistently oriented faces.
     const verts = tris.map(t => t.x), anchors = tris.map(t => t.anchor), vertOwners = tris.map(t => t.owners);
-    const next = new Map(); // owner -> Map(b -> [[c, triangle]])
-    tris.forEach((t, ti) => { for (let r = 0; r < 3; r++) {
-      const a = t.owners[r], b = t.owners[(r + 1) % 3], c = t.owners[(r + 2) % 3];
-      if (!next.has(a)) next.set(a, new Map());
-      const m = next.get(a); if (!m.has(b)) m.set(b, []); m.get(b).push([c, ti]);
-    } });
+    // Twins: the triangle with directed edge p -> q is glued to one with q -> p. Where the same faces
+    // meet at two places there are two of each; they are paired by nearest anchors.
+    const dir = new Map(); // "p,q" -> [[triangle, rotation]]
+    tris.forEach((t, ti) => { for (let r = 0; r < 3; r++) { const key = `${t.owners[r]},${t.owners[(r + 1) % 3]}`; if (!dir.has(key)) dir.set(key, []); dir.get(key).push(ti); } });
+    const twin = new Map(); // "triangle,p,q" -> triangle across that edge
+    for (const [key, list] of dir) {
+      const [p, q] = key.split(','), back = (dir.get(`${q},${p}`) || []).slice();
+      if (p > q && dir.has(`${q},${p}`)) continue; // each undirected edge once
+      const fwd = list.slice();
+      while (fwd.length && back.length) {
+        let bi = 0, bj = 0, bd = Infinity;
+        fwd.forEach((t, i) => back.forEach((u, j) => { const d = dist2(anchors[t], anchors[u]); if (d < bd) { bd = d; bi = i; bj = j; } }));
+        const t = fwd.splice(bi, 1)[0], u = back.splice(bj, 1)[0];
+        twin.set(`${t},${p},${q}`, u); twin.set(`${u},${q},${p}`, t);
+      }
+    }
     const edgeUse = new Map();
     tris.forEach(t => { const [a, b, c] = t.owners; for (const [p, q] of [[a, b], [b, c], [c, a]]) { const key = p < q ? `${p},${q}` : `${q},${p}`; edgeUse.set(key, (edgeUse.get(key) || 0) + 1); } });
     stats.nonManifoldEdges = [...edgeUse.values()].filter(n => n !== 2).length;
+    // Around owner a: triangle (a, b, c) is followed by the triangle across its edge c -> a, which
+    // contains a -> c, i.e. is (a, c, d).
     const polys = []; stats.openFans = 0; stats.splitFans = 0;
     let agree = 0;
-    for (const [a, m] of next) {
+    const byOwner = new Map();
+    tris.forEach((t, ti) => t.owners.forEach(a => { if (!byOwner.has(a)) byOwner.set(a, []); byOwner.get(a).push(ti); }));
+    for (const [a, list] of byOwner) {
       const used = new Set(); let cycles = 0;
-      const starts = [...m.keys()].sort((p, q) => { // start chains where nothing leads in, so open fans are walked whole
-        const into = b => [...m.values()].some(l => l.some(([c, ti]) => c === b && !used.has(ti)));
-        return into(p) - into(q); });
-      for (const b0 of starts) {
-        let b = b0; const ring = [];
-        while (m.get(b)?.some(([, ti]) => !used.has(ti))) {
-          // The same faces can meet at two places (two edges between a and b): continue with the
-          // triangle nearest to the previous one on the contour.
-          const cand = m.get(b).filter(([, t]) => !used.has(t)), last = ring.length ? anchors[ring[ring.length - 1]] : null;
-          const [c, ti] = last && cand.length > 1 ? cand.reduce((p, q) => dist2(anchors[q[1]], last) < dist2(anchors[p[1]], last) ? q : p) : cand[0];
-          used.add(ti); ring.push(ti); b = c;
+      for (const t0 of list) {
+        if (used.has(t0)) continue;
+        const ring = []; let t = t0, closed = false;
+        while (t !== undefined && !used.has(t)) {
+          used.add(t); ring.push(t);
+          const o = tris[t].owners, r = o.indexOf(a), c = o[(r + 2) % 3];
+          t = twin.get(`${t},${c},${a}`);
+          if (t === t0) closed = true;
         }
-        if (!ring.length) continue;
-        if (b !== b0) stats.openFans++;
+        if (!closed) { // walk the other way to collect the whole open fan
+          stats.openFans++;
+          let u = t0;
+          for (;;) { const o = tris[u].owners, r = o.indexOf(a), b = o[(r + 1) % 3], v = twin.get(`${u},${a},${b}`); if (v === undefined || used.has(v)) break; used.add(v); ring.unshift(v); u = v; }
+        }
         if (ring.length < 3) continue;
         cycles++;
         const V = ring.map(ti => verts[ti]), nn = [0, 0, 0], n = planes.get(a).normal;
@@ -848,7 +852,7 @@
       if (cycles > 1) stats.splitFans++;
     }
     if (agree < 0) for (const P of polys) P.verts.reverse(); // face the + side
-    stats.facelessOwners = [...planes.keys()].filter(a => !next.has(a)).length;
+    stats.facelessOwners = [...planes.keys()].filter(a => !byOwner.has(a)).length;
     return { verts, anchors, vertOwners, polys, patchStats: stats };
   }
 
