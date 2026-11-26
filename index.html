@@ -488,6 +488,16 @@ function buildSurface() {
 }
 
 // Opaque, so it needs no sorting against the transparent mesh: it is drawn first and writes depth.
+// Triangulate a face given as vertex ids (outer loop and hole loops) in the plane with normal n.
+// Returns triangles as triples of vertex ids.
+function triangulateFace(outer, holes, n) {
+  const N = new THREE.Vector3(...n), U = new THREE.Vector3(Math.abs(n[0]) < 0.9 ? 1 : 0, Math.abs(n[0]) < 0.9 ? 0 : 1, 0).cross(N).normalize(), W = N.clone().cross(U);
+  const to2 = k => { const p = new THREE.Vector3(...data.recovered.verts[k]), v = new THREE.Vector2(p.dot(U), p.dot(W)); v.id = k; return v; };
+  const C = outer.map(to2), H = holes.map(h => h.map(to2));
+  const tris = THREE.ShapeUtils.triangulateShape(C, H), all = [...C, ...H.flat()]; // indexes the (possibly reordered) inputs
+  return tris.map(t => t.map(i => all[i].id));
+}
+
 function buildRecovered() {
   disposeGroup(groups.recovered);
   groups.recovered = null;
@@ -504,15 +514,17 @@ function buildRecovered() {
       for (let k = 0; k < V.length; k++) epos.push(...V[k], ...V[(k + 1) % V.length]);
     }
   } else for (const P of r.polys) {
-    const V = P.verts.map(k => r.verts[k]);
-    for (let k = 1; k + 1 < V.length; k++) { pos.push(...V[0], ...V[k], ...V[k + 1]); for (let q = 0; q < 3; q++) col.push(COL_REC.r, COL_REC.g, COL_REC.b); }
-    for (let k = 0; k < V.length; k++) epos.push(...V[k], ...V[(k + 1) % V.length]);
+    // Faces may be non-convex, pinched (a vertex visited twice) or have holes: ear-clip in their plane.
+    for (const t of triangulateFace(P.verts, P.holes || [], P.normal)) {
+      for (const k of t) { pos.push(...r.verts[k]); col.push(COL_REC.r, COL_REC.g, COL_REC.b); }
+    }
+    for (const L of [P.verts, ...(P.holes || [])]) for (let k = 0; k < L.length; k++) epos.push(...r.verts[L[k]], ...r.verts[L[(k + 1) % L.length]]);
   }
   // Holes: a directed polygon edge whose reverse is in no polygon borders a missing region.
-  const dir = new Set();
-  if (!r.clip) for (const P of r.polys) P.verts.forEach((a, k) => dir.add(`${a},${P.verts[(k + 1) % P.verts.length]}`));
-  if (!r.clip) for (const P of r.polys) P.verts.forEach((a, k) => {
-    const b = P.verts[(k + 1) % P.verts.length];
+  const loops = r.clip ? [] : r.polys.flatMap(P => [P.verts, ...(P.holes || [])]), dir = new Set();
+  for (const L of loops) L.forEach((a, k) => dir.add(`${a},${L[(k + 1) % L.length]}`));
+  for (const L of loops) L.forEach((a, k) => {
+    const b = L[(k + 1) % L.length];
     if (!dir.has(`${b},${a}`)) hole.push(...r.verts[a], ...r.verts[b]);
   });
   r.nHoleEdges = hole.length / 6;
@@ -577,8 +589,15 @@ function updateStats() {
       : data.recovered.clip ? `clipped planes: ${data.recovered.polys.length} faces, ${data.recovered.nEmpty} clipped away ` +
         `(${data.recovered.nEmptyFeature} at corners / creases)\n`
       : `recovered: ${data.recovered.polys.length} faces, ${data.recovered.verts.length} vertices, ` +
-        `${data.recovered.badOwners.length} non-disc regions, ${data.recovered.nHoleEdges} hole edges\n`) +
+        `${data.recovered.nHoleEdges} hole edges\n` + recTopo(data.recovered.topo)) +
     `power diagram: ${data.ms.toFixed(0)} ms`;
+}
+
+function recTopo(t) {
+  if (!t) return '';
+  const parts = [[t.splitRegions, 'split regions'], [t.annuli, 'faces with holes'], [t.pinched, 'pinched faces'], [t.erasedHoles, 'step-only holes erased'],
+    [t.collapsed, 'regions with < 3 corners collapsed'], [t.multiArc, 'face pairs sharing 2+ edges']].filter(([n]) => n);
+  return parts.length ? `topology: ${parts.map(([n, l]) => `${n} ${l}`).join(', ')}\n` : '';
 }
 
 // ---------- Help pop-ups ----------

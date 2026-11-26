@@ -71,12 +71,12 @@ By (1), the own face of every tangent point is unchanged for every `s`; only the
 
 Each step is given to one of its two owners, so the contour is partitioned into one region per tangent point.
 
-1. Weld the contour's vertices (each cell computes its own copy). Label each own face with its owner. Label each step with whichever of its two owners has the nearer tangent point (measured from the face's centroid).
+1. Weld the contour's vertices (each cell computes its own copy; repeated corners of tiny faces are dropped). Label each own face with its owner. Label each step with whichever of its two owners has the nearer tangent point (measured from the face's centroid).
 2. Clean up so each region is one connected piece containing its own face. A stray component goes to its other owner, or else to its most common neighboring region. A region enclosed by a single other region is merged into it.
 3. Output vertices: contour vertices where three or more regions meet, placed where those regions' tangent planes meet (see *Vertex placement*).
-4. Output faces: each region's boundary loop on the contour, keeping only the output vertices on it. A region whose boundary is not one simple loop, or has fewer than three output vertices, leaves a hole (reported as a non-disc region).
+4. Output faces: each region's boundary on the contour, keeping only the output vertices on it. Regions that are not discs still become faces (see *Topology of the regions*), so no region is dropped.
 
-Because the regions tile the contour, neighboring faces share their boundary and vertices by construction, so cracks only appear at non-disc regions. The nearest-tangent-point rule already imposes Voronoi locality on the regions, which is why this method depends little on `s`.
+Because the regions tile the contour, neighboring faces share their boundary and vertices by construction, so the result is closed. The nearest-tangent-point rule already imposes Voronoi locality on the regions, which is why this method depends little on `s`.
 
 ![Left: the contour at s = 0.1 colored by region, one color per tangent point. Right: the recovered polygon, with vertices where neighboring regions' tangent lines meet, follows the true curve including both creases.](figures/fig-contract.svg)
 
@@ -101,27 +101,37 @@ Cracks are therefore an artifact of reading neighbors locally, not of the topolo
 
 ## Topology of the regions
 
-The contour is a closed 2-manifold, so the regions of Contract contour regions tile it, and contracting each region to one face is well defined. The result is a polygon mesh with one simple face per tangent point exactly when every region is a disc. Otherwise the code currently drops the region, which leaves a hole (the "non-disc regions" in the stats). Measured with `topo` in `recoverSurface`'s result (exact `tau`, trust 2, seed 1):
+The contour is a closed 2-manifold, so the regions of Contract contour regions tile it, and contracting each region is well defined. Leaving a hole is never necessary. Each connected piece of a region is handled by its boundary cycles, taken in the region's tangent plane: the largest is the outer boundary, cycles of the same orientation are lobes pinched to it at a vertex, and cycles of the opposite orientation are holes.
 
-| shape, sampling | n | s | split before cleanup | non-disc after cleanup: disconnected / annulus / pinched / < 3 vertices | pairs meeting along 2+ arcs | junctions of 4+ regions |
-|---|---|---|---|---|---|---|
-| torus, uniform | 300 | 1 / 0.1 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
-| torus, uniform | 1500 | 1 / 0.1 | 4 / 1 | 0 / 2 (pinched) | 0 / 0 | 0 / 0 |
-| two spheres, uniform | 300 | 1 / 0.1 | 1 / 0 | 1 (pinched) / 0 | 0 / 0 | 0 / 0 |
-| two spheres, uniform | 1500 | 1 / 0.1 | 4 / 5 | 0 / 0 | 0 / 0 | 0 / 0 |
-| box, uniform | 300 | 1 / 0.1 | 12 / 13 | 10 (0/0/4/6) / 3 (0/0/2/1) | 17 / 8 | 8 / 8 |
-| box, uniform | 1500 | 1 / 0.1 | 18 / 15 | 7 (0/0/2/5) / 7 (0/1/2/4) | 4 / 0 | 8 / 8 |
-| torus, near surface | 1500 | 1 / 0.1 | 1 / 3 | 0 / 0 | 0 / 2 | 0 / 0 |
-| two spheres, near surface | 300 | 1 / 0.1 | 3 / 8 | 0 / 11 (7/3/1/0) | 0 / 0 | 0 / 1 |
-| two spheres, near surface | 1500 | 1 / 0.1 | 8 / 6 | 1 (0/0/0/1) / 5 (2/1/2/0) | 2 / 0 | 0 / 0 |
-
-So non-disc regions are rare on smooth surfaces (0–2 of 300–1500) and concentrate at sharp features: the box's 8 corners are exactly its 8 junctions of 4+ regions (three faces' worth of planes meet there, and the regions near a corner pinch or are left with fewer than three junctions), and the dense two-sphere crease has disconnected regions that the cleanup could not fix. Each kind has a topologically valid output instead of a hole:
-
-- *Disconnected*: split into one face per piece, each in the same tangent plane.
-- *Annulus* (the region surrounds other regions): a face with a hole, in its tangent plane.
-- *Pinched* (the boundary touches itself at a vertex): a weakly simple polygon that visits that vertex twice.
-- *Fewer than three junctions* (a region with only one or two neighbors): it has no corner of its own; merge it into a neighbor.
+- *Split* (the region has several pieces): one face per piece, all in the same tangent plane.
+- *Pinched* (the boundary touches itself at a vertex): one weakly simple polygon that visits that vertex twice.
+- *Hole with only steps inside* (no own face): erased; the steps are given to the region.
+- *Hole with own faces inside* (an annulus): a face with a hole. The faces inside meet the annulus face at the junctions on the hole's boundary, so they attach to the annulus's tangent plane.
+- *Fewer than three junctions*: the piece has no corners of its own. Its one or two neighbors already share the edge between its junctions, so it collapses to that edge, which leaves no hole. (Merging it into a neighbor instead cascaded and made faces far larger than their tangent points' neighborhoods.)
 - *Two neighbors meeting along two arcs*: two edges between the same two faces, both on the line `P_a ∩ P_b`.
+
+The viewer triangulates faces by ear clipping in their plane, which handles non-convex, pinched and holed faces, and reports these cases under "topology" in the stats. Measured with `topo` in `recoverSurface`'s result (exact `tau`, trust 2, seed 1); "before" is the previous code, which dropped every non-disc region:
+
+| shape, sampling | n | s | hole edges before → now | max error | pinched / holes erased / collapsed / pairs sharing 2+ edges |
+|---|---|---|---|---|---|
+| torus, uniform | 1500 | 0.1 | 8 → 0 | 0.076 | 0 / 0 / 0 / 0 |
+| two spheres, uniform | 300 | 1 | 14 → 0 | 0.084 | 0 / 0 / 0 / 0 |
+| box, uniform | 300 | 1 | 18 → 0 | exact | 1 / 0 / 8 / 19 |
+| box, uniform | 1500 | 1 | 11 → 0 | exact | 1 / 8 / 6 / 4 |
+| box, uniform | 1500 | 0.1 | 14 → 0 | exact | 0 / 0 / 6 / 0 |
+| two spheres, near surface | 300 | 0.1 | 51 → 0 | 0.090 | 0 / 0 / 0 / 0 |
+| two spheres, near surface | 1500 | 0.1 | 20 → 0 | 0.056 | 0 / 0 / 0 / 0 |
+
+All 20 runs (torus, two spheres and box; uniform and near-surface; 300 and 1500 samples; `s = 1` and `0.1`) now have 0 hole edges, with the same maximum error as before. Most of the old non-disc regions were not topological at all: welding merged two consecutive corners of a tiny contour face, and the resulting `u → u` boundary edge broke the boundary walk. With that fixed, the remaining cases are at the box's corners and edges. No annulus occurred in any run, so that path is untested on real data.
+
+### Ideas: contracting a patch of steps directly
+
+Think of the steps as patches. The boundary of a connected patch is an edge loop, and each edge separates a step from an own face `a_i` outside the patch. Removing the patch means joining the planes `P_{a_1}, …, P_{a_k}` around the loop.
+
+- *The loop polygon.* Intersect consecutive outside planes pairwise: the lines `P_{a_i} ∩ P_{a_{i+1}}`, consecutive lines meeting at `P_{a_{i−1}} ∩ P_{a_i} ∩ P_{a_{i+1}}`. For `k = 3` this is one point, a clean vertex. For `k > 3` it is a small skew polygon in no tangent plane, likely badly shaped.
+- *Triangulate the loop in the dual instead.* A triangulation of the `k`-gon of own faces has `k − 2` triangles, each a vertex `P_a ∩ P_b ∩ P_c`, and its diagonals are the pairs of own faces that become adjacent across the patch. The hole then closes with no extra face and every face stays in a tangent plane. The choice of triangulation is the real decision. Contract contour regions makes it implicitly, by nearest tangent point (Delaunay-like on the tangent points).
+- *Choose it from the planes.* Locally, write the planes as heights over the patch. Where the surface is convex, it should be the upper envelope of the planes (the boundary of the intersection of the half-spaces `f_a ≤ 0`); where concave, the lower envelope. The envelope of affine functions is itself a 2D power diagram (equivalently, by polar duality, a convex hull of the planes' dual points), so its dual is a regular triangulation of the planes. This is the "change of generators": the triangulation of each patch comes from a regular triangulation in plane space, not from the samples. It would also address the mismatch between the contour's adjacency and the plane arrangement behind the far torus vertices, because envelope vertices lie on the envelope over the patch. Saddles are neither envelope; there a minimum-weight triangulation of the `k`-gon by dynamic programming (`O(k³)`), with a cost such as the distance of each triple point from the patch, is a fallback.
+- *An annulus of steps.* If the patch is a ring with own faces inside its hole, it has two boundary loops, `a_1 … a_k` outside and `b_1 … b_m` inside. Joining them is the classic problem of tiling between two contours (Fuchs, Kedem and Uselton 1977): every triangle uses two consecutive faces of one loop and one of the other, and an optimal tiling is found by dynamic programming in `O(km)` with the same costs. If the annulus is an own region rather than steps, it stays a face with a hole, as above.
 
 ## Vertex placement (`qefTruncated`)
 
@@ -235,6 +245,6 @@ Before the trust region: 1500 samples, `s = 0.1`, `tau = 10⁻²` (see *Results 
 
 ## Open problems
 
-- Non-disc regions (partition) and cracks (extension) at sparse sampling.
+- Cracks in Extend own faces, whose neighbors are read locally (see the 2D figure); the chain rule is global, but its 3D form needs a triangulation of each step patch (see *Ideas*).
 - Where the contour's adjacency does not match the plane arrangement, the trust region keeps vertices near the surface, but their faces are then no longer exactly planar.
 - The absolute tolerance in `powerdiagram.js` limits how small `s` can be.

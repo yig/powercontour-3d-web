@@ -58,7 +58,7 @@
   // sites, signs, owner, cells: as in the viewer (cells from computePowerDiagram).
   // planes: owner -> { point, normal } (the tangent point and the unit SDF gradient).
   // lambda: pull toward the contour vertex; keeps nearly parallel planes well-posed.
-  // Returns { verts, anchors, vertOwners, polys: [{ owner, normal, verts }], badOwners, nRegions }.
+  // Returns { verts, anchors, vertOwners, polys: [{ owner, normal, verts, holes }], badOwners, nRegions, topo }.
   function recoverSurface(sites, signs, owner, cells, planes, lambda, tau = 0, trust = Infinity) {
     // 1. Contour faces (oriented from the + side), welded, each labeled with the owning region.
     const welder = makeWelder(), faces = [];
@@ -76,7 +76,10 @@
         }
         const alt = label === a ? b : a;
         if (!planes.get(label)) continue; // a sample on the surface has no tangent plane
-        faces.push({ label, alt: planes.get(alt) ? alt : label, green: a === b, vs: f.verts.map(p => welder.id(p)) });
+        // Welding can merge consecutive corners of a tiny face: drop the repeats (a u -> u edge breaks boundary walks).
+        const vs = f.verts.map(p => welder.id(p)).filter((u, k, w) => u !== w[(k + 1) % w.length]);
+        if (vs.length < 3) continue;
+        faces.push({ label, alt: planes.get(alt) ? alt : label, green: a === b, vs });
       }
     });
 
@@ -139,14 +142,85 @@
       if (!changed) break;
     }
 
-    const vLabels = welder.pts.map(() => new Set());
-    for (const F of faces) for (const u of F.vs) vLabels[u].add(F.label);
+    // 4. Topology. Every region must become faces: dropping one leaves a hole in the surface. For each
+    //    connected piece of a region, take its boundary cycles. The largest (by area in the region's
+    //    tangent plane) is the outer boundary; cycles of the same orientation are lobes pinched to it at
+    //    a vertex; cycles of the opposite orientation are holes. A hole with no own face inside contains
+    //    only steps, so it is erased (given to the region). Repeat until stable. A piece with fewer
+    //    than three junctions has no corners of its own and collapses: its one or two neighbors already
+    //    share the edge between its junctions, so dropping it leaves no hole.
+    const topo = { split0, erasedHoles: 0, collapsed: 0, pieces: 0, splitRegions: 0, pinched: 0, annuli: 0, multiArc: 0, junction4: 0 };
+    const pts = welder.pts;
+    function cycleArea(cyc, n) {
+      const a = [0, 0, 0];
+      cyc.forEach((u, k) => { const p = pts[u], q = pts[cyc[(k + 1) % cyc.length]];
+        a[0] += p[1] * q[2] - p[2] * q[1]; a[1] += p[2] * q[0] - p[0] * q[2]; a[2] += p[0] * q[1] - p[1] * q[0]; });
+      return (a[0] * n[0] + a[1] * n[1] + a[2] * n[2]) / 2;
+    }
+    let pieces, comp, vLabels;
+    function analyze() {
+      vLabels = pts.map(() => new Set());
+      for (const F of faces) for (const u of F.vs) vLabels[u].add(F.label);
+      comp = new Int32Array(faces.length).fill(-1); pieces = [];
+      faces.forEach((F, fi) => {
+        if (comp[fi] >= 0) return;
+        const P = { label: F.label, faces: [fi] }; comp[fi] = pieces.length;
+        for (let q = 0; q < P.faces.length; q++) for (const g of nbrs[P.faces[q]]) if (comp[g] < 0 && faces[g].label === F.label) { comp[g] = pieces.length; P.faces.push(g); }
+        pieces.push(P);
+      });
+      pieces.forEach((P, pi) => {
+        const out = new Map(); P.across = new Map(); // boundary half-edges u -> [v]; "u,v" -> face across
+        for (const fi of P.faces) {
+          const vs = faces[fi].vs;
+          vs.forEach((u, k) => {
+            const v = vs[(k + 1) % vs.length], tw = heFace.get(`${v},${u}`);
+            if (tw !== undefined && comp[tw] === pi) return;
+            if (!out.has(u)) out.set(u, []);
+            out.get(u).push(v); P.across.set(`${u},${v}`, tw);
+          });
+        }
+        P.pinched = [...out.values()].some(vs => vs.length > 1);
+        const cycles = [];
+        for (const [u0, vs0] of out) while (vs0.length) {
+          const cyc = []; let u = u0;
+          do { cyc.push(u); u = out.get(u)?.pop(); } while (u !== undefined && u !== u0);
+          if (u === u0) cycles.push(cyc);
+        }
+        const n = planes.get(P.label).normal, areas = cycles.map(c => cycleArea(c, n));
+        const o = areas.reduce((b, a, k) => Math.abs(a) > Math.abs(areas[b]) ? k : b, 0), sg = Math.sign(areas[o]);
+        P.outer = cycles[o] || []; P.holes = []; P.extra = [];
+        cycles.forEach((c, k) => {
+          if (k === o) return;
+          if (Math.sign(areas[k]) !== sg) { P.holes.push(c); return; }
+          const i = P.outer.findIndex(u => c.includes(u)); // splice a lobe in at a shared vertex
+          if (i < 0) { P.extra.push(c); return; }
+          const j = c.indexOf(P.outer[i]);
+          P.outer = [...P.outer.slice(0, i + 1), ...c.slice(j + 1), ...c.slice(0, j + 1), ...P.outer.slice(i + 1)];
+        });
+      });
+    }
+    for (let iter = 0; iter < 8; iter++) {
+      analyze();
+      let changed = false;
+      pieces.forEach((P, pi) => {
+        for (const h of P.holes) {
+          const seen = new Set(), st = [];
+          h.forEach((u, k) => { const f = P.across.get(`${u},${h[(k + 1) % h.length]}`); if (f !== undefined && !seen.has(f)) { seen.add(f); st.push(f); } });
+          while (st.length) for (const g of nbrs[st.pop()]) if (comp[g] !== pi && !seen.has(g)) { seen.add(g); st.push(g); }
+          if (seen.size > faces.length / 2 || [...seen].some(f => faces[f].green)) continue;
+          for (const f of seen) faces[f].label = P.label;
+          topo.erasedHoles++; changed = true;
+        }
+      });
+      if (!changed) break;
+    }
 
-    // 4. Output vertices: contour vertices where >= 3 regions meet, placed where their planes meet.
-    const outId = new Int32Array(welder.pts.length).fill(-1), verts = [], anchors = [], vertOwners = [];
+    // 5. Output vertices: contour vertices where >= 3 regions meet, placed where those regions' tangent planes meet.
+    const outId = new Int32Array(pts.length).fill(-1), verts = [], anchors = [], vertOwners = [];
     vLabels.forEach((ls, k) => {
       if (ls.size < 3) return;
-      const v = welder.pts[k];
+      if (ls.size >= 4) topo.junction4++;
+      const v = pts[k];
       // tau: exact plane intersection, truncated where the planes are dependent (qefTruncated);
       // otherwise Tikhonov regularization toward the contour vertex with weight lambda.
       const reg = tau ? 0 : lambda;
@@ -162,46 +236,29 @@
       outId[k] = verts.length; verts.push(x); anchors.push(v); vertOwners.push([...ls]);
     });
 
-    // 5. Boundary of each region: half-edges whose twin belongs to another region (or is missing).
-    const bnext = new Map(); // label -> Map(u -> [v, ...])
-    faces.forEach((F, fi) => {
-      for (let k = 0; k < F.vs.length; k++) {
-        const u = F.vs[k], v = F.vs[(k + 1) % F.vs.length], tw = heFace.get(`${v},${u}`);
-        if (tw !== undefined && faces[tw].label === F.label) continue;
-        if (!bnext.has(F.label)) bnext.set(F.label, new Map());
-        const m = bnext.get(F.label);
-        if (!m.has(u)) m.set(u, []);
-        m.get(u).push(v);
+    // 6. Faces: one per piece (several for a split region), keeping the output vertices on its
+    //    boundary; holes that contain own faces stay as holes of the face (an annulus).
+    //    Contour faces are oriented from + to −; reverse so faces face the + (outside) side.
+    const polys = [], badOwners = [], ring = c => c.map(k => outId[k]).filter(k => k >= 0).reverse();
+    const perLabel = new Map();
+    for (const P of pieces) {
+      perLabel.set(P.label, (perLabel.get(P.label) || 0) + 1);
+      const normal = planes.get(P.label).normal;
+      for (const c of [P.outer, ...P.extra]) {
+        const R = ring(c);
+        if (R.length < 3) { topo.collapsed++; continue; }
+        const holes = c === P.outer ? P.holes.map(ring).filter(H => H.length >= 3) : [];
+        if (holes.length) topo.annuli++;
+        if (P.pinched) topo.pinched++;
+        // A neighbor met along two separate arcs: the two faces share two edges.
+        const runs = c.map((u, k) => { const f = P.across.get(`${u},${c[(k + 1) % c.length]}`); return f === undefined ? -1 : faces[f].label; }), seen = new Set();
+        runs.forEach((l, k) => { if (l !== runs[(k + runs.length - 1) % runs.length]) { if (seen.has(l)) topo.multiArc++; seen.add(l); } });
+        polys.push({ owner: P.label, normal, verts: R, holes });
       }
-    });
-
-    // 6. One polygon per region: walk its boundary loop, keeping the output vertices on it.
-    //    A region that is not a disc (several loops, or a vertex visited twice) is reported instead.
-    //    topo classifies the regions that are not discs, for diagnosis (RECOVERY.md).
-    const polys = [], badOwners = [], comps = components();
-    const topo = { split0, disconnected: 0, annulus: 0, pinched: 0, fewVerts: 0, multiArc: 0, junction4: vLabels.filter(ls => ls.size >= 4).length };
-    const twinLabel = new Map(); // "u,v" boundary half-edge -> label across it
-    faces.forEach(F => F.vs.forEach((u, k) => { const v = F.vs[(k + 1) % F.vs.length], tw = heFace.get(`${v},${u}`); twinLabel.set(`${u},${v}`, tw === undefined ? -1 : faces[tw].label); }));
-    for (const [label, m] of bnext) {
-      let pinched = false;
-      for (const vs of m.values()) if (vs.length > 1) pinched = true;
-      const [start] = m.keys(), loop = [];
-      let u = start, steps = 0;
-      do { loop.push(u); u = m.get(u)?.[0]; steps++; } while (u !== undefined && u !== start && steps <= m.size);
-      if (pinched || u !== start || steps !== m.size) {
-        badOwners.push(label);
-        if (comps.get(label) > 1) topo.disconnected++; else if (pinched) topo.pinched++; else topo.annulus++;
-        continue;
-      }
-      // A neighbor met along two separate arcs of the loop: the two faces would share two edges.
-      const runs = loop.map((k, i) => twinLabel.get(`${k},${loop[(i + 1) % loop.length]}`)), seen = new Set();
-      runs.forEach((l, i) => { if (l !== runs[(i + runs.length - 1) % runs.length]) { if (seen.has(l)) topo.multiArc++; seen.add(l); } });
-      const ring = loop.map(k => outId[k]).filter(k => k >= 0);
-      if (ring.length < 3) { badOwners.push(label); topo.fewVerts++; continue; }
-      // Contour faces are oriented from + to −; flip so polygons face the + (outside) side.
-      polys.push({ owner: label, normal: planes.get(label).normal, verts: ring.reverse() });
     }
-    return { verts, anchors, vertOwners, polys, badOwners, nRegions: bnext.size, topo };
+    topo.pieces = pieces.length;
+    topo.splitRegions = [...perLabel.values()].filter(n => n > 1).length;
+    return { verts, anchors, vertOwners, polys, badOwners, nRegions: perLabel.size, topo };
   }
 
   // ---------- Extended own faces ----------
