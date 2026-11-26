@@ -54,6 +54,7 @@
       <option value="sphere">Sphere</option>
       <option value="box">Box</option>
       <option value="torus" selected>Torus</option>
+      <option value="cylinder">Cylinder</option>
       <option value="twospheres">Two spheres (union)</option>
       <option value="obj">OBJ file…</option>
     </select></div>
@@ -70,6 +71,9 @@
   <div class="row"><label>Seed</label><input type="number" id="seed" value="1"></div>
   <label class="check"><input type="checkbox" id="sampled" checked> Sampled points</label>
   <div class="row"><label>Sphere scale</label><input type="range" id="sScale" min="0.01" max="1" step="0.01" value="1"><span class="val" id="sScale-v"></span></div>
+  <label class="check"><input type="checkbox" id="balls"> Tangent balls instead of sample spheres</label>
+  <div class="row" id="ballRhoRow"><label>Ball size ρ</label><input type="range" id="ballRho" min="0.05" max="1" step="0.05" value="0.5"><span class="val" id="ballRho-v"></span></div>
+  <div class="row" id="ballCapRow"><label>Ball cap, log₁₀</label><input type="range" id="ballCap" min="-1" max="3" step="0.5" value="2"><span class="val" id="ballCap-v"></span></div>
   <label class="check"><input type="checkbox" id="tangent"> Tangent points</label>
   <label class="check"><input type="checkbox" id="mirrored"> Mirrored pairs t ± δn</label>
 
@@ -93,6 +97,7 @@
       <option value="off">Off</option>
       <option value="patches">Triangulate step patches</option>
       <option value="regions">Contract contour regions</option>
+      <option value="merge">Merge steps into faces</option>
       <option value="extend">Extend own faces</option>
       <option value="clip">Clip tangent planes</option>
     </select></div>
@@ -102,6 +107,10 @@
     <label class="check" id="eMergeRow"><input type="checkbox" id="eMerge" checked> Merge flipped junctions</label>
     <label class="check" id="pChamferRow"><input type="checkbox" id="pChamfer" checked> Chamfer far vertices</label>
     <label class="check" id="pStitchRow"><input type="checkbox" id="pStitch" checked> Stitch two-loop patches</label>
+  </div>
+  <div id="mergeOpts">
+    <label class="check"><input type="checkbox" id="mSnap"> Snap vertices toward their planes</label>
+    <label class="check"><input type="checkbox" id="mGaps"> Exactly planar faces, with gap faces</label>
   </div>
   <div id="clipOpts">
     <div class="row"><label>Parallel (°)</label><input type="range" id="cParallel" min="0" max="45" step="1" value="10"><span class="val" id="cParallel-v"></span></div>
@@ -140,6 +149,7 @@ const shapes = {
   sphere: { ...Shapes.sphere, meshes: () => [new THREE.Mesh(new THREE.SphereGeometry(0.8, 64, 32))] },
   box: { ...Shapes.box, meshes: () => [new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.0, 0.8))] },
   torus: { ...Shapes.torus, meshes: () => [new THREE.Mesh(new THREE.TorusGeometry(0.75, 0.3, 32, 96))] },
+  cylinder: { ...Shapes.cylinder, meshes: () => [new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 1.4, 96).rotateX(Math.PI / 2))] },
   twospheres: { ...Shapes.twospheres, meshes: () => [-0.45, 0.45].map(cx => {
     const m = new THREE.Mesh(new THREE.SphereGeometry(0.55, 64, 32)); m.position.x = cx; return m;
   }) },
@@ -268,7 +278,13 @@ function compute() {
     const t = shape.closest(p); // exact: the normal is the unit vector from t to p
     planes.set(k, { point: t, normal: [(p[0] - t[0]) / d, (p[1] - t[1]) / d, (p[2] - t[2]) / d], d });
   });
-  if ($('sampled').checked) {
+  // Tangent balls (Approach 4): one ball per tangent point, on the side with the larger empty ball.
+  const tb = $('balls').checked ? Recover.tangentBallSites(planes, { rho: +$('ballRho').value, cap: 10 ** +$('ballCap').value }) : null;
+  if ($('sampled').checked && tb) {
+    for (let k = 0; k < planes.size; k++) {
+      sites.push(tb.sites[k]); weights.push(tb.weights[k]); signs.push(tb.signs[k]); isTangent.push(false); isMirror.push(false); owner.push(tb.owner[k]);
+    }
+  } else if ($('sampled').checked) {
     // Sphere scale s moves each sample toward its tangent point, keeping its sphere tangent there:
     // the own face (sample | tangent point) stays exactly in the tangent plane for any s.
     const sc = +$('sScale').value;
@@ -280,7 +296,7 @@ function compute() {
   }
   if ($('tangent').checked) {
     for (const [k, { point, d }] of planes) {
-      sites.push(point); weights.push(0); signs.push(d >= 0 ? -1 : 1); isTangent.push(true); isMirror.push(false); owner.push(k);
+      sites.push(point); weights.push(0); signs.push(tb ? -tb.balls.get(k).side : d >= 0 ? -1 : 1); isTangent.push(true); isMirror.push(false); owner.push(k);
     }
   }
   if ($('mirrored').checked) {
@@ -288,7 +304,9 @@ function compute() {
     m.sites.forEach((p, k) => { sites.push(p); weights.push(0); signs.push(m.signs[k]); isTangent.push(true); isMirror.push(true); owner.push(m.owner[k]); });
   }
   const t0 = performance.now();
-  const cells = PowerDiagram.computePowerDiagram(sites, weights, [-B, -B, -B], [B, B, B]);
+  // Big balls lose precision in |p|² − w: pass it computed from t and n (lifts).
+  const lifts = tb ? sites.map((p, i) => i < (($('sampled').checked) ? planes.size : 0) ? tb.lifts[i] : p[0] * p[0] + p[1] * p[1] + p[2] * p[2] - weights[i]) : undefined;
+  const cells = PowerDiagram.computePowerDiagram(sites, weights, [-B, -B, -B], [B, B, B], lifts);
   const ms = performance.now() - t0;
   data = { sites, weights, signs, isTangent, isMirror, owner, planes, cells, ms };
   data.recovered = null;
@@ -298,6 +316,8 @@ function compute() {
     data.recovered = Recover.extendOwnFaces(sites, signs, owner, cells, planes, extendOpts());
   } else if (method === 'patches' && contractible) {
     data.recovered = Recover.triangulatePatches(sites, signs, owner, cells, planes, extendOpts());
+  } else if (method === 'merge' && contractible) {
+    data.recovered = Recover.mergeSteps(sites, signs, owner, cells, planes, { snap: $('mSnap').checked ? 0.1 : 0, gaps: $('mGaps').checked });
   } else if (method === 'regions' && contractible) {
     // Intersects the tangent planes of the regions that the sample-to-own-tangent faces grow into.
     data.recovered = Recover.recoverSurface(sites, signs, owner, cells, planes, REC_LAMBDA, extendOpts().tau, extendOpts().trust);
@@ -350,7 +370,8 @@ function buildTransparent() {
   const tv = tp.length / 3;
 
   const sphereSites = [];
-  for (let k = 0; k < sites.length; k++) if (weights[k] > 0) sphereSites.push(k);
+  // Tangent balls can be far bigger than the domain; those are not drawn.
+  for (let k = 0; k < sites.length; k++) if (weights[k] > 0 && weights[k] <= 4 * B * B) sphereSites.push(k);
   const faces = []; // { i: positive site, j: negative site, verts }
   let area = 0;
   cells.forEach((cf, i) => {
@@ -509,7 +530,8 @@ function buildRecovered() {
   groups.recovered = null;
   const r = data.recovered;
   $('recLegend').innerHTML = (r?.clip ? [[COL_REC, 'tangent plane face'], [COL_REC_FEATURE, 'corner / edge / crease tangent point']]
-    : r?.patchStats?.chamfers ? [[COL_REC, 'tangent plane face'], [COL_REC_FEATURE, 'chamfer (planes meet beyond the trust radius)']] : [])
+    : r?.patchStats?.chamfers ? [[COL_REC, 'tangent plane face'], [COL_REC_FEATURE, 'chamfer (planes meet beyond the trust radius)']]
+    : r?.mergeStats?.gapFaces ? [[COL_REC, 'tangent plane face'], [COL_REC_FEATURE, 'gap face (between neighboring planes)']] : [])
     .map(([c, l]) => `<span class="legend" style="background:#${c.getHexString()}"></span>${l}`).join('<br>');
   if (!r) { applyVisuals(); return; }
   const pos = [], col = [], epos = [], hole = [];
@@ -523,7 +545,7 @@ function buildRecovered() {
   } else for (const P of r.polys) {
     // Faces may be non-convex, pinched (a vertex visited twice) or have holes: ear-clip in their plane.
     for (const t of triangulateFace(P.verts, P.holes || [], P.normal)) {
-      const c = P.chamfer ? COL_REC_FEATURE : COL_REC;
+      const c = P.chamfer || P.gap ? COL_REC_FEATURE : COL_REC;
       for (const k of t) { pos.push(...r.verts[k]); col.push(c.r, c.g, c.b); }
     }
     for (const L of [P.verts, ...(P.holes || [])]) for (let k = 0; k < L.length; k++) epos.push(...r.verts[L[k]], ...r.verts[L[(k + 1) % L.length]]);
@@ -579,10 +601,12 @@ function applyVisuals() {
   const planes = clipPlanes();
   scene.traverse(o => { if (o.material && o !== bboxHelper) o.material.clippingPlanes = planes; });
   $('clipOpts').style.display = $('recMethod').value === 'clip' ? '' : 'none';
+  $('mergeOpts').style.display = $('recMethod').value === 'merge' ? '' : 'none';
+  for (const id of ['ballRhoRow', 'ballCapRow']) $(id).style.display = $('balls').checked ? '' : 'none';
   $('extendOpts').style.display = ['extend', 'regions', 'patches'].includes($('recMethod').value) ? '' : 'none';
   $('eMergeRow').style.display = $('recMethod').value === 'extend' ? '' : 'none';
   for (const id of ['pChamferRow', 'pStitchRow']) $(id).style.display = $('recMethod').value === 'patches' ? '' : 'none';
-  for (const id of ['npts', 'sScale', 'eTau', 'eTrust', 'sphOp', 'pcOp', 'surfOp', 'sliceZ', 'cParallel', 'cSimilar', 'cTurn', 'cMargin', 'cOnPlane']) $(id + '-v').textContent = (+$(id).value).toString().slice(0, 5);
+  for (const id of ['npts', 'sScale', 'ballRho', 'ballCap', 'eTau', 'eTrust', 'sphOp', 'pcOp', 'surfOp', 'sliceZ', 'cParallel', 'cSimilar', 'cTurn', 'cMargin', 'cOnPlane']) $(id + '-v').textContent = (+$(id).value).toString().slice(0, 5);
 }
 
 function updateStats() {
@@ -596,6 +620,7 @@ function updateStats() {
       : data.recovered.nTriples !== undefined ? `extended faces: ${data.recovered.polys.length} faces, ${data.recovered.verts.length} vertices ` +
         `(${data.recovered.nMerged} merged junctions), ${data.recovered.nDegenerate} degenerate, ${data.recovered.nHoleEdges} hole edges\n`
       : data.recovered.patchStats ? patchLine(data.recovered)
+      : data.recovered.mergeStats ? mergeLine(data.recovered)
       : data.recovered.clip ? `clipped planes: ${data.recovered.polys.length} faces, ${data.recovered.nEmpty} clipped away ` +
         `(${data.recovered.nEmptyFeature} at corners / creases)\n`
       : `recovered: ${data.recovered.polys.length} faces, ${data.recovered.verts.length} vertices, ` +
@@ -610,6 +635,13 @@ function patchLine(r) {
     `${t.saddle} saddle, ${t.flat} flat` + (t.nonManifoldEdges ? `; ${t.nonManifoldEdges} non-manifold edges` : '') + (t.facelessOwners ? `; ${t.facelessOwners} tangent points without a face` : '') + '\n';
 }
 
+function mergeLine(r) {
+  const t = r.mergeStats;
+  return `merged: ${r.polys.length - t.gapFaces} faces, ${r.verts.length} vertices, ${r.nHoleEdges} hole edges\n` +
+    `${t.ownFaces} own faces + ${t.steps} steps; steps up to ${t.offPlane.toExponential(1)} off their face's plane` +
+    (t.gapFaces ? `; ${t.gapFaces} gap faces up to ${t.gapWidth.toExponential(1)} wide` : '') + '\n' + recTopo(r.topo);
+}
+
 function recTopo(t) {
   if (!t) return '';
   const parts = [[t.splitRegions, 'split regions'], [t.annuli, 'faces with holes'], [t.pinched, 'pinched faces'], [t.erasedHoles, 'step-only holes erased'],
@@ -620,12 +652,15 @@ function recTopo(t) {
 // ---------- Help pop-ups ----------
 // One text per control; a "?" button after each control shows it. README.md has the same texts.
 const HELP = {
-  shape: 'The surface: a sphere, a box, a torus, the union of two spheres (which has a concave crease where they meet), or a triangle mesh from an OBJ file. Each has an exact SDF and closest point (shapes.js). An OBJ is centered and scaled to fit [−1, 1]³; you can also drop one onto the page. Its sign assumes a closed, consistently oriented mesh.',
+  shape: 'The surface: a sphere, a box, a torus, a capped cylinder (developable side, flat caps), the union of two spheres (which has a concave crease where they meet), or a triangle mesh from an OBJ file. Each has an exact SDF and closest point (shapes.js). An OBJ is centered and scaled to fit [−1, 1]³; you can also drop one onto the page. Its sign assumes a closed, consistently oriented mesh.',
   sampling: 'How sample points are placed in the box [−1.5, 1.5]³: uniform random, a jittered or regular grid, or uniform random keeping only points with |d| < 0.1.',
   npts: 'Number of sample points. The power diagram costs O(n²): 1500 points take a couple of seconds.',
   seed: 'Random seed for the sampling.',
   sampled: 'Put each sample into the power diagram: a site with weight d², i.e. a sphere of radius |d| that touches the surface at its closest point, signed by d.',
   sScale: 'Moves each sample toward its tangent point, p → t + s(p − t), and shrinks its sphere to radius s|d| so it stays tangent there. The face between a sample and its own tangent point stays exactly in the tangent plane for every s; only the other faces change, getting thinner as s → 0. About 0.1 is good for surface recovery.',
+  balls: 'Replace each sample’s sphere by a ball tangent to the surface at the tangent point, on the side where the largest ball empty of other tangent points is bigger (the convex side; the sample’s sign is not used), with radius ρ × that empty radius, at most the cap. The face between a ball and its own tangent point stays exactly in the tangent plane. The other faces (steps) lie within (|x − t_a|² − |x − t_b|²) / 2λ of a tangent plane, so big balls flatten them onto the planes on convex, concave and developable parts; on saddles the empty balls are small and steps stay. Balls bigger than the domain are not drawn.',
+  ballRho: 'Tangent balls: the ball radius as a fraction of the largest empty ball on its side. Below 1 so that the ball never touches another tangent point; 0.5 is the default.',
+  ballCap: 'Tangent balls: the largest ball radius, 10^value. Where the surface is flat or convex the empty ball is unbounded; steps there shrink like 1/cap. 2 (radius 100) is the default; much larger loses precision.',
   tangent: 'Add each sample’s closest surface point as a site with weight 0 and the opposite sign. The face between a sample and its own tangent point lies exactly in the tangent plane.',
   mirrored: 'For each tangent point t with normal n, add the pair t + δn (outside) and t − δn (inside), δ = 0.001. Their contour is each tangent plane clipped to t’s Voronoi cell, plus thin steps between neighbors.',
   sphOp: 'Opacity of the sample spheres (radius √weight). 0 hides them.',
@@ -633,7 +668,9 @@ const HELP = {
   pcOp: 'Opacity of the power contour: the faces between a + cell and a − cell. 0 hides it.',
   pcEdges: 'Outline the contour faces.',
   pcColorBy: 'Uniform gold, or color each face by the kinds of sites it separates, with a legend and counts. Green faces (a sample and its own tangent point) lie exactly in the tangent plane; the others are steps between them.',
-  recMethod: 'Build a surface whose faces lie in the tangent planes. Triangulate step patches: remove each patch of other faces by triangulating the loop of own faces around it, choosing the triangulation from the tangent planes (their envelope where the loop is convex or concave; a decider on saddles). Contract contour regions: give each other contour face to one of its two own faces, and intersect the tangent planes where regions meet. Extend own faces: extend each own face from its own boundary, without assigning the other faces. Both need sampled + tangent points only. Clip tangent planes: clip each tangent plane by its neighbors’ planes (any sites). See RECOVERY.md.',
+  recMethod: 'Build a surface whose faces lie in the tangent planes. Triangulate step patches: remove each patch of other faces by triangulating the loop of own faces around it, choosing the triangulation from the tangent planes (their envelope where the loop is convex or concave; a decider on saddles). Contract contour regions: give each other contour face to one of its two own faces, and intersect the tangent planes where regions meet. Merge steps into faces: give each other contour face to the owner whose tangent plane it is nearer, and keep every vertex of the resulting regions at its contour position (a vertex of the power diagram, never a plane intersection). Meant for Tangent balls, where the steps nearly lie in the planes; faces are then planar up to the step heights. Extend own faces: extend each own face from its own boundary, without assigning the other faces. These four need sampled + tangent points only. Clip tangent planes: clip each tangent plane by its neighbors’ planes (any sites). See RECOVERY.md.',
+  mSnap: 'Merge steps into faces: move each vertex to the point that minimizes the squared distances to its faces’ tangent planes plus 0.1 × its squared distance to its contour position. Faces get flatter; vertices move by about the step height.',
+  mGaps: 'Merge steps into faces: give every face its own copies of its corners, projected onto its tangent plane, so it is exactly planar; then close the gaps between neighbors with orange gap faces (one per shared edge, one per vertex shared by three or more faces). Watertight; the gaps are as wide as the steps.',
   eTau: 'Planes count as dependent (e.g. coplanar faces of the box) when eigenvalues of Σ n nᵀ fall below 10^value × the largest; the vertex then keeps its contour position in those directions. With the trust radius on, this only needs to catch exact degeneracies: −12 is numerical precision. Without it (trust at 10 = off), about −2 is needed to stop nearly dependent planes from sending vertices far away.',
   eTrust: 'A tangent plane is only accurate within about one sample spacing of its tangent point. A vertex may move at most this many spacings (the distance from its contour position to the farthest of its tangent points) away from its contour position: it is the exact intersection of its planes if that is near, else the nearest point on the line where the two best-determined planes meet, else on one plane. 2 keeps box corners exact and removes far-away vertices on curved shapes. 10 = off.',
   pChamfer: 'Triangulate step patches: where three tangent planes meet beyond the trust radius, replace that vertex by a small orange chamfer face with one point on each line where two of the planes meet. Every tangent-plane face then stays exactly planar. Off: the vertex is pulled back within the trust radius instead, off some of its planes.',
@@ -691,7 +728,8 @@ $('objLoad').addEventListener('click', () => $('objFile').click());
 $('objFile').addEventListener('change', e => { readOBJFile(e.target.files[0]); e.target.value = ''; });
 document.addEventListener('dragover', e => e.preventDefault());
 document.addEventListener('drop', e => { e.preventDefault(); readOBJFile(e.dataTransfer.files[0]); });
-for (const id of ['sampling', 'seed', 'sampled', 'tangent', 'mirrored', 'recMethod', 'sScale']) $(id).addEventListener('change', compute);
+for (const id of ['sampling', 'seed', 'sampled', 'tangent', 'mirrored', 'recMethod', 'sScale', 'balls', 'ballRho', 'ballCap', 'mSnap', 'mGaps']) $(id).addEventListener('change', compute);
+for (const id of ['ballRho', 'ballCap']) $(id).addEventListener('input', applyVisuals);
 $('sScale').addEventListener('input', applyVisuals);
 for (const id of ['eTau', 'eTrust', 'eMerge', 'pChamfer', 'pStitch']) $(id).addEventListener('change', compute);
 for (const id of ['eTau', 'eTrust']) $(id).addEventListener('input', applyVisuals);

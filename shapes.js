@@ -14,6 +14,7 @@
 
   const BOX = [0.7, 0.5, 0.4];                          // half extents
   const TORUS = { R: 0.75, r: 0.3 };                     // axis z
+  const CYL = { r: 0.5, h: 0.7 };                        // capped cylinder, axis z: radius, half height
   const TWO = { R: 0.55, cx: 0.45 };                     // spheres at (±cx, 0, 0)
   TWO.rc = Math.sqrt(TWO.R * TWO.R - TWO.cx * TWO.cx);   // crease circle radius, in the plane x = 0
 
@@ -191,6 +192,22 @@
         const rxy = Math.hypot(p[0], p[1]);
         const c = rxy === 0 ? [TORUS.R, 0, 0] : [TORUS.R * p[0] / rxy, TORUS.R * p[1] / rxy, 0];
         return onSphere(p, c, TORUS.r);
+      },
+    },
+    // A developable side (one principal curvature is zero everywhere) between flat caps.
+    cylinder: {
+      sdf: ([x, y, z]) => {
+        const dx = Math.hypot(x, y) - CYL.r, dz = Math.abs(z) - CYL.h;
+        return Math.min(Math.max(dx, dz), 0) + Math.hypot(Math.max(dx, 0), Math.max(dz, 0));
+      },
+      // Outside: clamp the radius and the height. Inside: onto the nearer of the side and the caps.
+      closest: ([x, y, z]) => {
+        const rho = Math.hypot(x, y), ux = rho > 0 ? x / rho : 1, uy = rho > 0 ? y / rho : 0;
+        let R = rho, Z = z;
+        if (rho > CYL.r || Math.abs(z) > CYL.h) { R = Math.min(rho, CYL.r); Z = Math.max(-CYL.h, Math.min(CYL.h, z)); }
+        else if (CYL.r - rho < CYL.h - Math.abs(z)) R = CYL.r;
+        else Z = (z < 0 ? -1 : 1) * CYL.h;
+        return [R * ux, R * uy, Z];
       },
     },
     twospheres: {
