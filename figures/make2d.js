@@ -158,6 +158,30 @@ function extendOwn(S, st, trust = 2, tau = 1e-12) {
   return { faces: faces.filter(f => f.keys.every(k => k)).map(f => ({ owner: f.owner, ends: f.keys.map(k => verts.get(k)) })), verts: [...verts.values()] };
 }
 
+// The chain rule: along each contour loop, delete the steps between consecutive own faces a and c,
+// and join a and c at P_a ∩ P_c, anchored at the middle of the deleted chain. Global, so symmetric.
+function extendChain(S, st, trust = 2, tau = 1e-12) {
+  const key = v => `${v[0].toFixed(9)},${v[1].toFixed(9)}`, from = new Map();
+  st.edges.forEach(e => from.set(key(e.a), e));
+  const used = new Set(), faces = [], verts = [];
+  for (const e0 of st.edges) {
+    if (used.has(e0)) continue;
+    const loop = []; let e = e0;
+    while (e && !used.has(e)) { used.add(e); loop.push(e); e = from.get(key(e.b)); }
+    const own = loop.map((e, k) => e.own ? k : -1).filter(k => k >= 0);
+    if (own.length < 2) continue; // a loop with fewer than two tangent points: nothing to join
+    const vs = own.map((k, i) => { // the vertex after own face k: join it to the next own face
+      const k2 = own[(i + 1) % own.length], n = loop.length, chain = [];
+      for (let j = (k + 1) % n; j !== k2; j = (j + 1) % n) chain.push(loop[j]);
+      const pts = chain.length ? chain.flatMap(c => [c.a, c.b]) : [loop[k].b], m = [0, 1].map(c => pts.reduce((s, q) => s + q[c], 0) / pts.length);
+      return { ...place(m, [loop[k].owners[0], loop[k2].owners[0]], S, tau, trust), shared: true };
+    });
+    own.forEach((k, i) => faces.push({ owner: loop[k].owners[0], ends: [vs[(i + own.length - 1) % own.length], vs[i]] }));
+    verts.push(...vs);
+  }
+  return { faces, verts };
+}
+
 // ---------- SVG ----------
 const PX = 170;
 function svg(view, body, w) {
@@ -290,21 +314,23 @@ const full = [[-1.45, -1.05], [1.45, 1.1]];
   const vs = polys.flatMap(P => P.verts); console.log(`  contract: ${polys.length} loops, ${vs.length} vertices, ${vs.filter(v => v.kept < 2).length} limited, max |sdf| ${Math.max(...vs.map(v => Math.abs(sdf(v.x)))).toFixed(4)}`);
 }
 
-// 4b. Extend own faces at s = 1 and s = 0.1.
+// 4b. Extend own faces, s = 0.1: neighbors from the third cell at each end (as extendOwnFaces in 3D)
+//     vs. from the next own face along the contour (the chain rule).
 {
-  const view = [[-1.25, -0.85], [1.15, 0.95]], runs = [1, 0.1].map(sv => { const st = setup(S, sv); return { sv, st, r: extendOwn(S, st) }; });
+  const view = [[-1.25, -0.85], [1.15, 0.95]], st = setup(S, 0.1);
+  const runs = [['local rule (third cell at each end)', extendOwn(S, st)], ['chain rule (next own face along the contour)', extendChain(S, st)]].map(([title, r]) => ({ title, sv: 0.1, st, r }));
   const anyLimited = runs.some(({ r }) => r.verts.some(v => v.shared && v.kept < 2));
-  const parts = runs.map(({ sv, st, r }) => {
+  const parts = runs.map(({ title, sv, st, r }) => {
     const c = svg(view, '', 470);
     const open = r.verts.filter(v => !v.shared).length, err = Math.max(...r.verts.map(v => Math.abs(sdf(v.x))));
-    console.log(`  extend s=${sv}: ${r.faces.length} faces, ${r.verts.length} vertices, ${open} open ends, max |sdf| ${err.toFixed(4)}`);
+    console.log(`  extend ${title.split(' ')[0]}: ${r.faces.length} faces, ${r.verts.length} vertices, ${open} open ends, max |sdf| ${err.toFixed(4)}`);
     const body = [drawCurve(c),
       ...st.edges.map(e => `<line x1="${c.X(e.a[0])}" y1="${c.Y(e.a[1])}" x2="${c.X(e.b[0])}" y2="${c.Y(e.b[1])}" stroke="#bbb" stroke-width="1.5"/>`),
       ...r.faces.map(f => `<line x1="${c.X(f.ends[0].x[0])}" y1="${c.Y(f.ends[0].x[1])}" x2="${c.X(f.ends[1].x[0])}" y2="${c.Y(f.ends[1].x[1])}" stroke="#1a7f4b" stroke-width="2.2" stroke-linecap="round"/>`),
       ...r.verts.map(v => `<circle cx="${c.X(v.x[0])}" cy="${c.Y(v.x[1])}" r="${v.shared ? 2.6 : 4}" fill="${!v.shared ? COL.step : v.kept === 2 ? '#1a7f4b' : '#e67e22'}"/>`),
       ...S.map(q => `<circle cx="${c.X(q.t[0])}" cy="${c.Y(q.t[1])}" r="1.8" fill="#222"/>`),
-      panel(c, `sphere scale s = ${sv}: ${open} open end${open === 1 ? '' : 's'}`)];
-    if (sv === 0.1) body.push(legend(c, [['line', '#bbb', 'contour'], ['line', '#1a7f4b', 'extended own faces'], ['circ', '#1a7f4b', 'shared vertex'],
+      panel(c, `${title}: ${open} open end${open === 1 ? '' : 's'}`)];
+    if (title.startsWith('chain')) body.push(legend(c, [['line', '#bbb', 'contour'], ['line', '#1a7f4b', 'extended own faces'], ['circ', '#1a7f4b', 'shared vertex'],
       ...(anyLimited ? [['circ', '#e67e22', 'limited by trust region']] : []), ['circ', COL.step, 'open end: seen by one face only']], 70, 120));
     return c.wrap(body.join('\n'));
   });

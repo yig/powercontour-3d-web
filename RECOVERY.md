@@ -93,9 +93,35 @@ Steps are not assigned to anyone; each own face is extended from its own boundar
 
 This is the most literal form of "one face per tangent point, eliminate the rest", but because each face decides its neighbors alone, it leaves more cracks than the partition. It depends strongly on `s`: large spheres make wide steps, whose far ends are seen differently by different faces.
 
-![Extend own faces in 2D at sphere scale 1 and 0.1. On smooth parts each segment meets its neighbors at shared vertices; at the two creases some ends are seen by only one face and leave small cracks.](figures/fig-extend.svg)
+![Extend own faces in 2D at s = 0.1. Left, with neighbors read from the third cell at each end, faces at the creases name different neighbors and leave cracks. Right, joining consecutive own faces along the contour, the polygon is closed.](figures/fig-extend.svg)
 
-*Extend own faces in 2D, at `s = 1` and `s = 0.1`. Each own face is extended along its tangent line to the vertex it shares with the neighbor named by the third cell at its end. On smooth parts every end is matched and the result equals the contraction's (max error 0.022 in both). At the creases, tangent points crowd together and the steps between two faces pass through cells of a third owner, so face `a` names `b` while `b` names `c`. The ends then do not match, leaving cracks (red): 4 open ends at `s = 1`, 6 at `s = 0.1`. In 2D the steps on smooth parts are already tiny at `s = 1` (see above), so `s` matters little here; the strong dependence on `s` reported below is a 3D effect, where steps are wide polygons. The contraction has no cracks, because its regions tile the contour.*
+*Extend own faces in 2D, `s = 0.1`. Left: the rule `extendOwnFaces` uses, where each end of an own face names the owner of the third cell there. On smooth parts it matches the contraction (max error 0.022). At the creases tangent points crowd together and the steps between two own faces pass through cells of a third owner, so face `a` names `b` while `b`'s nearest end names `c`: the relation is not symmetric, and the unmatched ends are cracks (red, 6). Right: the chain rule. Walk the contour; between consecutive own faces `a` and `c`, delete the steps and join `a` and `c` at `P_a ∩ P_c`. The neighbor relation now comes from the contour's connectivity, so it is symmetric and there are no cracks (0 open ends). One tangent point is dropped: its own face is alone on a tiny separate contour loop.*
+
+Cracks are therefore an artifact of reading neighbors locally, not of the topology. In 3D the chain rule needs one more decision: a connected patch of steps can touch many own faces, and deleting it must say which of them become adjacent and where they meet. Contract contour regions makes that decision by giving each step to one of its owners.
+
+## Topology of the regions
+
+The contour is a closed 2-manifold, so the regions of Contract contour regions tile it, and contracting each region to one face is well defined. The result is a polygon mesh with one simple face per tangent point exactly when every region is a disc. Otherwise the code currently drops the region, which leaves a hole (the "non-disc regions" in the stats). Measured with `topo` in `recoverSurface`'s result (exact `tau`, trust 2, seed 1):
+
+| shape, sampling | n | s | split before cleanup | non-disc after cleanup: disconnected / annulus / pinched / < 3 vertices | pairs meeting along 2+ arcs | junctions of 4+ regions |
+|---|---|---|---|---|---|---|
+| torus, uniform | 300 | 1 / 0.1 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| torus, uniform | 1500 | 1 / 0.1 | 4 / 1 | 0 / 2 (pinched) | 0 / 0 | 0 / 0 |
+| two spheres, uniform | 300 | 1 / 0.1 | 1 / 0 | 1 (pinched) / 0 | 0 / 0 | 0 / 0 |
+| two spheres, uniform | 1500 | 1 / 0.1 | 4 / 5 | 0 / 0 | 0 / 0 | 0 / 0 |
+| box, uniform | 300 | 1 / 0.1 | 12 / 13 | 10 (0/0/4/6) / 3 (0/0/2/1) | 17 / 8 | 8 / 8 |
+| box, uniform | 1500 | 1 / 0.1 | 18 / 15 | 7 (0/0/2/5) / 7 (0/1/2/4) | 4 / 0 | 8 / 8 |
+| torus, near surface | 1500 | 1 / 0.1 | 1 / 3 | 0 / 0 | 0 / 2 | 0 / 0 |
+| two spheres, near surface | 300 | 1 / 0.1 | 3 / 8 | 0 / 11 (7/3/1/0) | 0 / 0 | 0 / 1 |
+| two spheres, near surface | 1500 | 1 / 0.1 | 8 / 6 | 1 (0/0/0/1) / 5 (2/1/2/0) | 2 / 0 | 0 / 0 |
+
+So non-disc regions are rare on smooth surfaces (0–2 of 300–1500) and concentrate at sharp features: the box's 8 corners are exactly its 8 junctions of 4+ regions (three faces' worth of planes meet there, and the regions near a corner pinch or are left with fewer than three junctions), and the dense two-sphere crease has disconnected regions that the cleanup could not fix. Each kind has a topologically valid output instead of a hole:
+
+- *Disconnected*: split into one face per piece, each in the same tangent plane.
+- *Annulus* (the region surrounds other regions): a face with a hole, in its tangent plane.
+- *Pinched* (the boundary touches itself at a vertex): a weakly simple polygon that visits that vertex twice.
+- *Fewer than three junctions* (a region with only one or two neighbors): it has no corner of its own; merge it into a neighbor.
+- *Two neighbors meeting along two arcs*: two edges between the same two faces, both on the line `P_a ∩ P_b`.
 
 ## Vertex placement (`qefTruncated`)
 

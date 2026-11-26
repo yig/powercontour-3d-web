@@ -91,6 +91,17 @@
     //    rule can leave stray pieces cut off from the region's green face; give those to the
     //    face's other owner, or failing that to the most common neighboring region. A region
     //    enclosed by a single other region (an island) is merged into it.
+    const components = () => { // connected pieces of each region: label -> count
+      const comp = new Int32Array(faces.length).fill(-1), count = new Map();
+      faces.forEach((F, fi) => {
+        if (comp[fi] >= 0) return;
+        comp[fi] = fi; const st = [fi];
+        while (st.length) for (const g of nbrs[st.pop()]) if (comp[g] < 0 && faces[g].label === F.label) { comp[g] = fi; st.push(g); }
+        count.set(F.label, (count.get(F.label) || 0) + 1);
+      });
+      return count;
+    };
+    const split0 = [...components().values()].filter(n => n > 1).length;
     for (let pass = 0; pass < 8; pass++) {
       const comp = new Int32Array(faces.length).fill(-1), comps = [];
       faces.forEach((F, fi) => {
@@ -166,20 +177,31 @@
 
     // 6. One polygon per region: walk its boundary loop, keeping the output vertices on it.
     //    A region that is not a disc (several loops, or a vertex visited twice) is reported instead.
-    const polys = [], badOwners = [];
+    //    topo classifies the regions that are not discs, for diagnosis (RECOVERY.md).
+    const polys = [], badOwners = [], comps = components();
+    const topo = { split0, disconnected: 0, annulus: 0, pinched: 0, fewVerts: 0, multiArc: 0, junction4: vLabels.filter(ls => ls.size >= 4).length };
+    const twinLabel = new Map(); // "u,v" boundary half-edge -> label across it
+    faces.forEach(F => F.vs.forEach((u, k) => { const v = F.vs[(k + 1) % F.vs.length], tw = heFace.get(`${v},${u}`); twinLabel.set(`${u},${v}`, tw === undefined ? -1 : faces[tw].label); }));
     for (const [label, m] of bnext) {
       let pinched = false;
       for (const vs of m.values()) if (vs.length > 1) pinched = true;
       const [start] = m.keys(), loop = [];
       let u = start, steps = 0;
       do { loop.push(u); u = m.get(u)?.[0]; steps++; } while (u !== undefined && u !== start && steps <= m.size);
-      if (pinched || u !== start || steps !== m.size) { badOwners.push(label); continue; }
+      if (pinched || u !== start || steps !== m.size) {
+        badOwners.push(label);
+        if (comps.get(label) > 1) topo.disconnected++; else if (pinched) topo.pinched++; else topo.annulus++;
+        continue;
+      }
+      // A neighbor met along two separate arcs of the loop: the two faces would share two edges.
+      const runs = loop.map((k, i) => twinLabel.get(`${k},${loop[(i + 1) % loop.length]}`)), seen = new Set();
+      runs.forEach((l, i) => { if (l !== runs[(i + runs.length - 1) % runs.length]) { if (seen.has(l)) topo.multiArc++; seen.add(l); } });
       const ring = loop.map(k => outId[k]).filter(k => k >= 0);
-      if (ring.length < 3) { badOwners.push(label); continue; }
+      if (ring.length < 3) { badOwners.push(label); topo.fewVerts++; continue; }
       // Contour faces are oriented from + to −; flip so polygons face the + (outside) side.
       polys.push({ owner: label, normal: planes.get(label).normal, verts: ring.reverse() });
     }
-    return { verts, anchors, vertOwners, polys, badOwners, nRegions: bnext.size };
+    return { verts, anchors, vertOwners, polys, badOwners, nRegions: bnext.size, topo };
   }
 
   // ---------- Extended own faces ----------
