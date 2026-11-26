@@ -44,5 +44,6 @@ shot box-trust 480 400 "{$REC, \"shape\": \"box\"}"
 shot twospheres-trust 480 400 "{$REC, \"shape\": \"twospheres\", \"cam\": [0.6, -2.4, 1.6]}"
 # Triangulate step patches, same settings.
 shot torus-patches 480 400 "{$REC, \"shape\": \"torus\", \"recMethod\": \"patches\"}"
+shot box-patches 480 400 "{$REC, \"shape\": \"box\", \"recMethod\": \"patches\"}"
 shot twospheres-patches 480 400 "{$REC, \"shape\": \"twospheres\", \"recMethod\": \"patches\", \"cam\": [0.6, -2.4, 1.6]}"
 rm -f "$TMP"

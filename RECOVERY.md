@@ -173,9 +173,9 @@ An earlier version of step 6 partitioned only the patch, by nearest tangent poin
 
 On smooth surfaces, choosing the triangulation from the planes puts far more vertices on the surface (14 instead of 64 off on the torus). The crease is visually cleaner, with fewer fins, but its worst vertices are farther off.
 
-| torus | two spheres |
-|---|---|
-| ![Torus recovered by triangulating step patches.](figures/torus-patches.png) | ![Two spheres recovered by triangulating step patches: the crease has fewer fins.](figures/twospheres-patches.png) |
+| torus | two spheres | box |
+|---|---|---|
+| ![Torus recovered by triangulating step patches.](figures/torus-patches.png) | ![Two spheres recovered by triangulating step patches: the crease has fewer fins.](figures/twospheres-patches.png) | ![Box recovered by triangulating step patches: exact flat faces, edges and corners.](figures/box-patches.png) |
 
 ### Open problems in this approach
 
