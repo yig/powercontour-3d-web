@@ -55,6 +55,7 @@
       <option value="box">Box</option>
       <option value="torus" selected>Torus</option>
       <option value="twospheres">Two spheres (union)</option>
+      <option value="cylinder">Capped cylinder</option>
       <option value="obj">OBJ file…</option>
     </select></div>
   <div class="row" id="objRow" style="display:none"><label>Mesh</label><span id="objName" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e0b050">No mesh: Load… or drop a file</span>
@@ -92,6 +93,7 @@
     <select id="recMethod">
       <option value="off">Off</option>
       <option value="patches">Triangulate step patches</option>
+      <option value="collapse">Collapse and flip</option>
       <option value="regions">Contract contour regions</option>
       <option value="extend">Extend own faces</option>
       <option value="clip">Clip tangent planes</option>
@@ -140,6 +142,7 @@ const shapes = {
   sphere: { ...Shapes.sphere, meshes: () => [new THREE.Mesh(new THREE.SphereGeometry(0.8, 64, 32))] },
   box: { ...Shapes.box, meshes: () => [new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.0, 0.8))] },
   torus: { ...Shapes.torus, meshes: () => [new THREE.Mesh(new THREE.TorusGeometry(0.75, 0.3, 32, 96))] },
+  cylinder: { ...Shapes.cylinder, meshes: () => [new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 1.4, 96).rotateX(Math.PI / 2))] },
   twospheres: { ...Shapes.twospheres, meshes: () => [-0.45, 0.45].map(cx => {
     const m = new THREE.Mesh(new THREE.SphereGeometry(0.55, 64, 32)); m.position.x = cx; return m;
   }) },
@@ -296,8 +299,8 @@ function compute() {
   const contractible = $('sampled').checked && $('tangent').checked && !$('mirrored').checked;
   if (method === 'extend' && contractible) {
     data.recovered = Recover.extendOwnFaces(sites, signs, owner, cells, planes, extendOpts());
-  } else if (method === 'patches' && contractible) {
-    data.recovered = Recover.triangulatePatches(sites, signs, owner, cells, planes, extendOpts());
+  } else if ((method === 'patches' || method === 'collapse') && contractible) {
+    data.recovered = Recover.triangulatePatches(sites, signs, owner, cells, planes, { ...extendOpts(), rank: method === 'collapse' });
   } else if (method === 'regions' && contractible) {
     // Intersects the tangent planes of the regions that the sample-to-own-tangent faces grow into.
     data.recovered = Recover.recoverSurface(sites, signs, owner, cells, planes, REC_LAMBDA, extendOpts().tau, extendOpts().trust);
@@ -579,9 +582,9 @@ function applyVisuals() {
   const planes = clipPlanes();
   scene.traverse(o => { if (o.material && o !== bboxHelper) o.material.clippingPlanes = planes; });
   $('clipOpts').style.display = $('recMethod').value === 'clip' ? '' : 'none';
-  $('extendOpts').style.display = ['extend', 'regions', 'patches'].includes($('recMethod').value) ? '' : 'none';
+  $('extendOpts').style.display = ['extend', 'regions', 'patches', 'collapse'].includes($('recMethod').value) ? '' : 'none';
   $('eMergeRow').style.display = $('recMethod').value === 'extend' ? '' : 'none';
-  for (const id of ['pChamferRow', 'pStitchRow']) $(id).style.display = $('recMethod').value === 'patches' ? '' : 'none';
+  for (const id of ['pChamferRow', 'pStitchRow']) $(id).style.display = ['patches', 'collapse'].includes($('recMethod').value) ? '' : 'none';
   for (const id of ['npts', 'sScale', 'eTau', 'eTrust', 'sphOp', 'pcOp', 'surfOp', 'sliceZ', 'cParallel', 'cSimilar', 'cTurn', 'cMargin', 'cOnPlane']) $(id + '-v').textContent = (+$(id).value).toString().slice(0, 5);
 }
 
@@ -607,7 +610,9 @@ function patchLine(r) {
   const t = r.patchStats;
   return `patches: ${r.polys.length} faces, ${r.verts.length} vertices, ${r.nHoleEdges} hole edges\n` +
     `${t.patches} step patches (${t.stitched} stitched, ${t.partitioned} by restricted Delaunay, ${t.flips} flips), ${t.chamfers} chamfers, ${t.junctions} junctions; loops ${t.convex} convex, ${t.concave} concave, ` +
-    `${t.saddle} saddle, ${t.flat} flat` + (t.nonManifoldEdges ? `; ${t.nonManifoldEdges} non-manifold edges` : '') + (t.facelessOwners ? `; ${t.facelessOwners} tangent points without a face` : '') + '\n';
+    `${t.saddle} saddle, ${t.flat} flat` + (t.nonManifoldEdges ? `; ${t.nonManifoldEdges} non-manifold edges` : '') + (t.facelessOwners ? `; ${t.facelessOwners} tangent points without a face` : '') + '\n' +
+    (t.collapsed === undefined ? '' : `collapse and flip: ${t.collapsed} coplanar collapses, ${t.envelopeFlips} envelope flips, ${t.mixedFlips} mixed flips; ` +
+      `dependent triangles (exactly / nearly) ${t.dependentBefore.join(' / ')} → ${t.dependentAfter.join(' / ')}\n`);
 }
 
 function recTopo(t) {
@@ -620,7 +625,7 @@ function recTopo(t) {
 // ---------- Help pop-ups ----------
 // One text per control; a "?" button after each control shows it. README.md has the same texts.
 const HELP = {
-  shape: 'The surface: a sphere, a box, a torus, the union of two spheres (which has a concave crease where they meet), or a triangle mesh from an OBJ file. Each has an exact SDF and closest point (shapes.js). An OBJ is centered and scaled to fit [−1, 1]³; you can also drop one onto the page. Its sign assumes a closed, consistently oriented mesh.',
+  shape: 'The surface: a sphere, a box, a torus, the union of two spheres (which has a concave crease where they meet), a capped cylinder (a developable side between flat caps), or a triangle mesh from an OBJ file. Each has an exact SDF and closest point (shapes.js). An OBJ is centered and scaled to fit [−1, 1]³; you can also drop one onto the page. Its sign assumes a closed, consistently oriented mesh.',
   sampling: 'How sample points are placed in the box [−1.5, 1.5]³: uniform random, a jittered or regular grid, or uniform random keeping only points with |d| < 0.1.',
   npts: 'Number of sample points. The power diagram costs O(n²): 1500 points take a couple of seconds.',
   seed: 'Random seed for the sampling.',
@@ -633,11 +638,11 @@ const HELP = {
   pcOp: 'Opacity of the power contour: the faces between a + cell and a − cell. 0 hides it.',
   pcEdges: 'Outline the contour faces.',
   pcColorBy: 'Uniform gold, or color each face by the kinds of sites it separates, with a legend and counts. Green faces (a sample and its own tangent point) lie exactly in the tangent plane; the others are steps between them.',
-  recMethod: 'Build a surface whose faces lie in the tangent planes. Triangulate step patches: remove each patch of other faces by triangulating the loop of own faces around it, choosing the triangulation from the tangent planes (their envelope where the loop is convex or concave; a decider on saddles). Contract contour regions: give each other contour face to one of its two own faces, and intersect the tangent planes where regions meet. Extend own faces: extend each own face from its own boundary, without assigning the other faces. Both need sampled + tangent points only. Clip tangent planes: clip each tangent plane by its neighbors’ planes (any sites). See RECOVERY.md.',
+  recMethod: 'Build a surface whose faces lie in the tangent planes. Triangulate step patches: remove each patch of other faces by triangulating the loop of own faces around it, choosing the triangulation from the tangent planes (their envelope where the loop is convex or concave; a decider on saddles). Collapse and flip: Triangulate step patches, then merge faces whose planes coincide, flip toward the planes’ envelope where four faces are all convex or all concave, and elsewhere flip where it pulls vertices into the trust radius and un-inverts edges. Contract contour regions: give each other contour face to one of its two own faces, and intersect the tangent planes where regions meet. Extend own faces: extend each own face from its own boundary, without assigning the other faces. Both need sampled + tangent points only. Clip tangent planes: clip each tangent plane by its neighbors’ planes (any sites). See RECOVERY.md.',
   eTau: 'Planes count as dependent (e.g. coplanar faces of the box) when eigenvalues of Σ n nᵀ fall below 10^value × the largest; the vertex then keeps its contour position in those directions. With the trust radius on, this only needs to catch exact degeneracies: −12 is numerical precision. Without it (trust at 10 = off), about −2 is needed to stop nearly dependent planes from sending vertices far away.',
   eTrust: 'A tangent plane is only accurate within about one sample spacing of its tangent point. A vertex may move at most this many spacings (the distance from its contour position to the farthest of its tangent points) away from its contour position: it is the exact intersection of its planes if that is near, else the nearest point on the line where the two best-determined planes meet, else on one plane. 2 keeps box corners exact and removes far-away vertices on curved shapes. 10 = off.',
-  pChamfer: 'Triangulate step patches: where three tangent planes meet beyond the trust radius, replace that vertex by a small orange chamfer face with one point on each line where two of the planes meet. Every tangent-plane face then stays exactly planar. Off: the vertex is pulled back within the trust radius instead, off some of its planes.',
-  pStitch: 'Triangulate step patches: a patch of steps with two boundary loops (a ring, or an own face as an island inside it) is triangulated by stitching the two loops with the planes’ envelope cost. Off: such patches keep the nearest-tangent-point partition.',
+  pChamfer: 'Triangulate step patches and Collapse and flip: where three tangent planes meet beyond the trust radius, replace that vertex by a small orange chamfer face with one point on each line where two of the planes meet. Every tangent-plane face then stays exactly planar. Off: the vertex is pulled back within the trust radius instead, off some of its planes.',
+  pStitch: 'Triangulate step patches and Collapse and flip: a patch of steps with two boundary loops (a ring, or an own face as an island inside it) is triangulated by stitching the two loops with the planes’ envelope cost. Off: such patches keep the nearest-tangent-point partition.',
   eMerge: 'Extend own faces: where four owners meet at nearly one point and their faces disagree about which diagonal is an edge, merge the junction into one vertex where all four planes meet. Off: such junctions leave cracks.',
   cParallel: 'Clip tangent planes: neighbors whose normals differ by less than this angle are split by their Voronoi bisector instead of by the line where their planes meet.',
   cUnion: 'Clip tangent planes: across a concave crease a face must be above at least one plane from the other side, not all of them, so concave constraints are combined by union (overlapping pieces).',

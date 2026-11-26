@@ -960,6 +960,7 @@
     //       edge's direction on the line P_p ∩ P_q is set by whether p-q is convex or concave). Each
     //       flip lowers the total cost, so the flips end.
     //     Options: rank = true (all three), 'collapse', 'lawson' (the first one or two steps).
+    const repOf = new Map(); // collapsed owner -> the owner it was merged into
     if (o.rank) {
       const detOf = os => { const [n1, n2, n3] = os.map(a => planes.get(a).normal);
         return n1[0] * (n2[1] * n3[2] - n2[2] * n3[1]) - n1[1] * (n2[0] * n3[2] - n2[2] * n3[0]) + n1[2] * (n2[0] * n3[1] - n2[1] * n3[0]); };
@@ -975,7 +976,7 @@
       const same = (a, b) => { const A = planes.get(a), B = planes.get(b);
         return Math.hypot(A.normal[0] - B.normal[0], A.normal[1] - B.normal[1], A.normal[2] - B.normal[2]) < 1e-7 && Math.abs(f(a, B.point)) < 1e-7 && Math.abs(f(b, A.point)) < 1e-7; };
       // Collapse.
-      const live = tris.map(() => true), nbr = new Map(), triOf = new Map(), repOf = new Map();
+      const live = tris.map(() => true), nbr = new Map(), triOf = new Map();
       const rep = a => { while (repOf.has(a)) a = repOf.get(a); return a; };
       const link = (ti, d) => { const t = tris[ti]; for (let r = 0; r < 3; r++) { const a = t.owners[r];
         if (!triOf.has(a)) { triOf.set(a, new Set()); nbr.set(a, new Map()); }
@@ -1190,7 +1191,7 @@
     }
     polys.push(...chamferPolys);
     if (agree < 0) for (const P of polys) P.verts.reverse(); // face the + side
-    stats.facelessOwners = [...planes.keys()].filter(a => !byOwner.has(a)).length;
+    stats.facelessOwners = [...planes.keys()].filter(a => !byOwner.has(a) && !repOf.has(a)).length;
     return { verts, anchors, vertOwners, polys, patchStats: stats, triangles: tris.map(t => t.owners), triVerts: vid };
   }
 
