@@ -1013,6 +1013,60 @@
         const onEdge = new Map(), add = ti => { const o3 = tris[ti].owners; for (let r = 0; r < 3; r++) { const key = pairKey(o3[r], o3[(r + 1) % 3]); if (!onEdge.has(key)) onEdge.set(key, new Set()); onEdge.get(key).add(ti); } };
         const del = ti => { const o3 = tris[ti].owners; for (let r = 0; r < 3; r++) onEdge.get(pairKey(o3[r], o3[(r + 1) % 3]))?.delete(ti); };
         tris.forEach((_, ti) => add(ti));
+        const quadKind = (a, b, c, d) => { // -1: all four edges convex, +1: all concave, 0: mixed
+          const ty = [etypeOf(a, b), etypeOf(b, c), etypeOf(c, d), etypeOf(d, a)];
+          return ty.every(e => e <= 0) && ty.includes(-1) ? -1 : ty.every(e => e >= 0) && ty.includes(1) ? 1 : 0; };
+        const hasDir = (os, p, q) => { const i = os.indexOf(p); return i >= 0 && os[(i + 1) % 3] === q; };
+        const planeSys = os => { const A = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], r = [0, 0, 0];
+          for (const a of os) { const { normal: n, point: t } = planes.get(a), c = n[0] * t[0] + n[1] * t[1] + n[2] * t[2];
+            for (let i = 0; i < 3; i++) { r[i] += n[i] * c; for (let j = 0; j < 3; j++) A[i][j] += n[i] * n[j]; } }
+          return [A, r]; };
+        // How far a triangle's exact vertex is beyond its trust radius (capped at the radius; the
+        // radius when the three planes have no common point).
+        const farCache = new Map();
+        const farCost = os => {
+          const key = [...os].sort((p, q) => p - q).join(',');
+          if (farCache.has(key)) return farCache.get(key);
+          const m = anchorOf3(os), [A, r] = planeSys(os), x = qefTruncated(A, r, m, o.tau), rho = rhoOf(m, os);
+          const resid = Math.max(...os.map(a => Math.abs(f(a, x))));
+          const c = !(rho < Infinity) ? 0 : resid > 1e-9 * (1 + rho) ? rho : Math.min(rho, Math.max(0, Math.sqrt(dist2(x, m)) - rho));
+          farCache.set(key, c);
+          return c;
+        };
+        // How much the edge p-q is inverted. Tpq contains the directed edge p -> q, Tqp contains q -> p;
+        // their vertices lie on the line P_p ∩ P_q at x0 + λ u, u = n_p × n_q, λ = -f_r(x0) / (n_r·u).
+        // In face p the edge runs from Tqp's vertex to Tpq's; with the face to its left, it is
+        // positive along u for a convex edge and along -u for a concave one (sigma: orientation).
+        // Parallel planes have no edge: cost R, as for a far vertex.
+        const edgeCost = (p, q, Tpq, Tqp) => {
+          const et = etypeOf(p, q); if (!et) return 0;
+          const np = planes.get(p).normal, nq = planes.get(q).normal, tp = planes.get(p).point, tq = planes.get(q).point;
+          const u = [np[1] * nq[2] - np[2] * nq[1], np[2] * nq[0] - np[0] * nq[2], np[0] * nq[1] - np[1] * nq[0]], ul = Math.hypot(u[0], u[1], u[2]);
+          const R = o.trust * Math.sqrt(dist2(tp, tq));
+          if (ul < 1e-9) return R;
+          const m = [(tp[0] + tq[0]) / 2, (tp[1] + tq[1]) / 2, (tp[2] + tq[2]) / 2], [A, rr] = planeSys([p, q]), x0 = qefTruncated(A, rr, m, o.tau);
+          const lam = T => { const s = T.find(x => x !== p && x !== q), n = planes.get(s).normal; return -f(s, x0) / (n[0] * u[0] + n[1] * u[1] + n[2] * u[2]); };
+          const len = -sigma * et * (lam(Tpq) - lam(Tqp)) * ul;
+          return Number.isFinite(len) ? Math.min(R, Math.max(0, -len)) : R;
+        };
+        const totalInversion = () => { let s = 0, k = 0;
+          for (const [key, ts] of onEdge) { if (ts.size !== 2) continue; const [p, q] = key.split(',').map(Number), [T1, T2] = [...ts].map(ti => tris[ti].owners);
+            const c = hasDir(T1, p, q) ? edgeCost(p, q, T1, T2) : edgeCost(p, q, T2, T1); s += c; if (c > 0) k++; }
+          return [k, +s.toFixed(3)]; };
+        stats.invertedBefore = totalInversion();
+        // The quad's cost: far vertices of its two triangles plus the inversion of its five edges
+        // (the four outer edges are measured against the triangles across them).
+        const quadJ = (a, b, c, d, t1, t2, T) => {
+          const all = [...T];
+          for (const [p, q] of [[a, b], [b, c], [c, d], [d, a]]) for (const ti of onEdge.get(pairKey(p, q)) || []) if (ti !== t1 && ti !== t2) { all.push(tris[ti].owners); break; }
+          let s = farCost(T[0]) + farCost(T[1]);
+          const seen = new Set();
+          for (const os of T) for (let k = 0; k < 3; k++) {
+            const p = os[k], q = os[(k + 1) % 3], key = pairKey(p, q); if (seen.has(key)) continue; seen.add(key);
+            const back = all.find(X => X !== os && hasDir(X, q, p)); if (back) s += edgeCost(p, q, os, back);
+          }
+          return s;
+        };
         const queue = [...onEdge.keys()];
         stats.rankFlips = 0;
         for (let guard = 0; queue.length && guard < 50 * tris.length; guard++) {
@@ -1029,9 +1083,10 @@
             if (!convexQuad(a, b, c, d)) continue;
             const before = Math.min(Math.abs(detOf([a, b, c])), Math.abs(detOf([a, c, d]))), after = Math.min(Math.abs(detOf([a, b, d])), Math.abs(detOf([b, c, d])));
             if (!(Math.min(Math.abs(detOf([a, b, c])), Math.abs(detOf([a, c, d]))) < DEP) || !(after > before * 1.01 + 1e-12)) continue;
+          } else if (o.rank === 'edges') { // experiment: lower the inversion of the quad's edges plus far vertices
+            if (!(quadJ(a, b, c, d, t1, t2, [[a, b, d], [b, c, d]]) < quadJ(a, b, c, d, t1, t2, [[a, b, c], [a, c, d]]) - 1e-12)) continue;
           } else {
-          const ty = [etypeOf(a, b), etypeOf(b, c), etypeOf(c, d), etypeOf(d, a)];
-          const kappa = ty.every(e => e <= 0) && ty.includes(-1) ? -1 : ty.every(e => e >= 0) && ty.includes(1) ? 1 : 0;
+          const kappa = quadKind(a, b, c, d);
           if (!kappa) continue;
           const m = anchorOf3([a, b, c, d].slice(0, 3)), scale = Math.max(...[a, b, c, d].map(u => Math.sqrt(dist2(m, planes.get(u).point)))) || 1;
           if (!(kappa * sigma * det4([a, b, c, d], m) < -1e-9 * scale)) continue;
@@ -1042,6 +1097,92 @@
           add(t1); add(t2); countEdges(tris[t1], 1); countEdges(tris[t2], 1); stats.rankFlips++;
           for (const [p, q] of [[a, b], [b, c], [c, d], [d, a]]) queue.push(pairKey(p, q));
         }
+        // Mixed quads (convex and concave edges): flip when it lowers the quad's cost quadJ. Each
+        // flip lowers the sum of all far and inversion costs, so the passes end.
+        stats.mixedFlips = 0;
+        if (o.rank === true || o.rank === 'mixed') {
+          const queue3 = [...onEdge.keys()];
+          for (let guard = 0; queue3.length && guard < 20 * tris.length; guard++) {
+            const key = queue3.pop(), ts = onEdge.get(key);
+            if (!ts || ts.size !== 2) continue;
+            const [t1, t2] = [...ts], [e0, e1] = key.split(',').map(Number), o1 = tris[t1].owners;
+            const r = [0, 1, 2].find(i => { const p = o1[i], q = o1[(i + 2) % 3]; return (p === e0 && q === e1) || (p === e1 && q === e0); });
+            if (r === undefined) continue;
+            const a = o1[r], b = o1[(r + 1) % 3], c = o1[(r + 2) % 3], o2 = tris[t2].owners, s2 = o2.indexOf(a);
+            if (s2 < 0 || o2[(s2 + 1) % 3] !== c) continue;
+            const d = o2[(s2 + 2) % 3];
+            if (b === d || edgeCount.has(pairKey(b, d)) || quadKind(a, b, c, d)) continue;
+            const scale = Math.sqrt(Math.max(dist2(planes.get(a).point, planes.get(c).point), dist2(planes.get(b).point, planes.get(d).point)));
+            if (!(quadJ(a, b, c, d, t1, t2, [[a, b, d], [b, c, d]]) < quadJ(a, b, c, d, t1, t2, [[a, b, c], [a, c, d]]) - 1e-6 * scale)) continue;
+            del(t1); del(t2); countEdges(tris[t1], -1); countEdges(tris[t2], -1);
+            for (const [ti, os] of [[t1, [a, b, d]], [t2, [b, c, d]]]) { const m3 = anchorOf3(os); tris[ti] = { owners: os, x: tripleVertex(os, m3), anchor: m3 }; }
+            add(t1); add(t2); countEdges(tris[t1], 1); countEdges(tris[t2], 1); stats.mixedFlips++;
+            for (const [p, q] of [[a, b], [b, c], [c, d], [d, a]]) queue3.push(pairKey(p, q));
+          }
+        }
+        // Bad triangles: their vertex is beyond the trust radius, or their planes have no common
+        // point. Flip an edge of one when both new triangles are good and no edge of the quad gets
+        // more inverted. The number of bad triangles drops with every flip.
+        if (o.debug) { // why bad triangles were not flipped by the envelope test
+          const why = {};
+          tris.forEach((t, ti) => { if (!(farCost(t.owners) > 0)) return;
+            const rs = [];
+            for (let r = 0; r < 3; r++) {
+              const os = t.owners, a = os[(r + 1) % 3], b = os[(r + 2) % 3], c = os[r];
+              const ts = onEdge.get(pairKey(c, a)); if (!ts || ts.size !== 2) { rs.push('nonmanifold'); continue; }
+              const t2 = [...ts].find(x => x !== ti), o2 = tris[t2].owners, s2 = o2.indexOf(a);
+              if (s2 < 0 || o2[(s2 + 1) % 3] !== c) { rs.push('orient'); continue; }
+              const d = o2[(s2 + 2) % 3];
+              if (b === d || edgeCount.has(pairKey(b, d))) { rs.push('exists'); continue; }
+              const kappa = quadKind(a, b, c, d); if (!kappa) { rs.push('mixed'); continue; }
+              const m = anchorOf3([a, b, c]), scale = Math.max(...[a, b, c, d].map(u => Math.sqrt(dist2(m, planes.get(u).point)))) || 1, D = kappa * sigma * det4([a, b, c, d], m);
+              if (Math.abs(D) <= 1e-9 * scale) { rs.push('tie'); continue; }
+              if (D > 0) { rs.push('regular'); continue; }
+              rs.push('gauss');
+            }
+            const key = rs.sort().join('+'); why[key] = (why[key] || 0) + 1; });
+          stats.whyBad = why;
+        }
+        stats.badBefore = tris.filter(t => farCost(t.owners) > 0).length;
+        stats.fixFlips = 0;
+        if (o.rank === true || o.rank === 'fix') {
+          const queue2 = []; tris.forEach((t, ti) => { if (farCost(t.owners) > 0) queue2.push(ti); });
+          for (let guard = 0; queue2.length && guard < 20 * tris.length; guard++) {
+            const ti = queue2.pop(); if (!(farCost(tris[ti].owners) > 0)) continue;
+            let best = null;
+            for (let r = 0; r < 3; r++) {
+              const os = tris[ti].owners, a = os[(r + 1) % 3], b = os[(r + 2) % 3], c = os[r]; // triangle (c, a, b) = (a, b, c) rotated; edge c-a
+              const ts = onEdge.get(pairKey(c, a)); if (!ts || ts.size !== 2) continue;
+              const t2 = [...ts].find(x => x !== ti), o2 = tris[t2].owners, s2 = o2.indexOf(a);
+              if (s2 < 0 || o2[(s2 + 1) % 3] !== c) continue;
+              const d = o2[(s2 + 2) % 3]; // triangles (a, b, c) and (a, c, d), diagonal a-c
+              if (b === d || edgeCount.has(pairKey(b, d))) continue;
+              const N1 = [a, b, d], N2 = [b, c, d];
+              if (farCost(N1) > 0 || farCost(N2) > 0) continue;
+              const kappa = quadKind(a, b, c, d);
+              if (kappa) { // an all-convex or all-concave quad already on the envelope stays
+                const m = anchorOf3([a, b, c]), scale = Math.max(...[a, b, c, d].map(u => Math.sqrt(dist2(m, planes.get(u).point)))) || 1;
+                if (kappa * sigma * det4([a, b, c, d], m) > 1e-9 * scale) continue;
+              }
+              const outside = (p, q) => { for (const x of onEdge.get(pairKey(p, q)) || []) if (x !== ti && x !== t2) return tris[x].owners; return null; };
+              const inv = T => { let s = 0; const all = [...T]; for (const [p, q] of [[a, b], [b, c], [c, d], [d, a]]) { const X = outside(p, q); if (X) all.push(X); }
+                const seen = new Set();
+                for (const os3 of T) for (let k = 0; k < 3; k++) { const p = os3[k], q = os3[(k + 1) % 3], key = pairKey(p, q); if (seen.has(key)) continue; seen.add(key);
+                  const back = all.find(X => X !== os3 && hasDir(X, q, p)); if (back) s += edgeCost(p, q, os3, back); }
+                return s; };
+              const gain = inv([[a, b, c], [a, c, d]]) - inv([N1, N2]);
+              if (gain < -1e-12) continue;
+              if (!best || gain > best.gain) best = { gain, t2, N1, N2 };
+            }
+            if (!best) continue;
+            const { t2 } = best;
+            del(ti); del(t2); countEdges(tris[ti], -1); countEdges(tris[t2], -1);
+            for (const [tj, os] of [[ti, best.N1], [t2, best.N2]]) { const m3 = anchorOf3(os); tris[tj] = { owners: os, x: tripleVertex(os, m3), anchor: m3 }; }
+            add(ti); add(t2); countEdges(tris[ti], 1); countEdges(tris[t2], 1); stats.fixFlips++;
+          }
+        }
+        stats.badAfter = tris.filter(t => farCost(t.owners) > 0).length;
+        stats.invertedAfter = totalInversion();
       }
       stats.dependentAfter = tris.filter(t => Math.abs(detOf(t.owners)) < DEP).length;
     }
