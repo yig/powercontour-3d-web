@@ -598,7 +598,7 @@
   // as possible to them on a saddle (mixed edges), which plays the role of an asymptotic decider.
   // Contour vertices where three or more own faces meet with no step between them are loops too.
   // The output faces are the duals: each own face's polygon is the cycle of triangles around it.
-  const PATCH_DEFAULTS = { tau: 1e-12, trust: 2, chamfer: true, stitch: true };
+  const PATCH_DEFAULTS = { tau: 1e-12, trust: 2, chamfer: true, stitch: true, rank: false };
   const DP_MAX = 24; // longer loops, and patches with holes, keep the partition's junctions
   function triangulatePatches(sites, signs, owner, cells, planes, opts) {
     const o = { ...PATCH_DEFAULTS, ...opts };
@@ -636,11 +636,12 @@
     const pairKey = (a, b) => a < b ? `${a},${b}` : `${b},${a}`;
     // The vertex of three planes for the dynamic programs' costs, anchored at m: their intersection,
     // limited to the trust radius (the final placement is in step 5).
+    let rhoOf = (m, os) => trustRadius(m, os, planes, o.trust); // replaced by the collapse (step 4b)
     const tripleVertex = (os, m) => {
       const A = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], r = [0, 0, 0];
       for (const a of os) { const { normal: n, point: t } = planes.get(a), c = n[0] * t[0] + n[1] * t[1] + n[2] * t[2];
         for (let p = 0; p < 3; p++) { r[p] += n[p] * c; for (let q = 0; q < 3; q++) A[p][q] += n[p] * n[q]; } }
-      return qefTruncated(A, r, m, o.tau, trustRadius(m, os, planes, o.trust));
+      return qefTruncated(A, r, m, o.tau, rhoOf(m, os));
     };
     const meanOf = us => { const m = [0, 0, 0]; for (const u of us) for (let c = 0; c < 3; c++) m[c] += pts[u][c] / us.length; return m; };
     patches.forEach((P, pi) => {
@@ -939,6 +940,112 @@
       }
     });
 
+    // 4b. Collapse and flip (option rank). On developable surfaces (planes, cylinders, cones) the
+    //     normals around a face span one or two directions, so many dual triangles have dependent
+    //     planes and no triple point near the surface.
+    //     - Collapse: a dual edge whose two planes coincide merges the two faces (same plane, one
+    //       face), when the link condition holds (the endpoints' common neighbors are exactly the two
+    //       opposite owners), so the triangulation stays a manifold. The merged face keeps all its
+    //       tangent points for the trust radius.
+    //     - Flip toward the envelope (Lawson), with the test written without the triple points, so it
+    //       also holds when they are at infinity. With plane vectors h = (n, -n.t), the triple point of
+    //       (a, b, c) is X with h.X = det[h_a; h_b; h_c; h], so f_d(x_abc) = D4(a,b,c,d) / D3(a,b,c).
+    //       In a convex (concave) region the Gauss map keeps orientation, so D3 has the sign of the
+    //       triangulation, and edge ac of triangles (a, b, c), (a, c, d) is on the envelope iff
+    //       -D4 (+D4) has that sign too. A flip negates D4, so exactly one diagonal passes. The
+    //       quad's four edges must all be convex or all concave, and both new triangles must keep
+    //       the orientation in the Gauss image (a convex quad there; a strip triangle with D3 = 0
+    //       may be flipped away but never created).
+
+    const detOf = os => { const [n1, n2, n3] = os.map(a => planes.get(a).normal);
+      return n1[0] * (n2[1] * n3[2] - n2[2] * n3[1]) - n1[1] * (n2[0] * n3[2] - n2[2] * n3[0]) + n1[2] * (n2[0] * n3[1] - n2[1] * n3[0]); };
+    if (o.rank) {
+      const DEP = 1e-3;
+      stats.dependentBefore = tris.filter(t => Math.abs(detOf(t.owners)) < DEP).length;
+      const members = new Map(); // representative owner -> owners merged into it
+      rhoOf = (m, os) => {
+        if (!(o.trust < Infinity)) return Infinity;
+        let far = 0;
+        for (const a of os) { let near = Infinity; for (const u of members.get(a) || [a]) near = Math.min(near, dist2(m, planes.get(u).point)); far = Math.max(far, Math.sqrt(near)); }
+        return o.trust * far;
+      };
+      const same = (a, b) => { const A = planes.get(a), B = planes.get(b);
+        return Math.hypot(A.normal[0] - B.normal[0], A.normal[1] - B.normal[1], A.normal[2] - B.normal[2]) < 1e-7 && Math.abs(f(a, B.point)) < 1e-7 && Math.abs(f(b, A.point)) < 1e-7; };
+      // Collapse.
+      const live = tris.map(() => true), nbr = new Map(), triOf = new Map();
+      const link = (ti, d) => { const t = tris[ti]; for (let r = 0; r < 3; r++) { const a = t.owners[r];
+        if (!triOf.has(a)) { triOf.set(a, new Set()); nbr.set(a, new Map()); }
+        d > 0 ? triOf.get(a).add(ti) : triOf.get(a).delete(ti);
+        for (const b of [t.owners[(r + 1) % 3], t.owners[(r + 2) % 3]]) { const N = nbr.get(a), c = (N.get(b) || 0) + d; c ? N.set(b, c) : N.delete(b); } } };
+      tris.forEach((_, ti) => link(ti, 1));
+      stats.collapsed = 0;
+      const todo = [];
+      for (const [a, N] of nbr) for (const b of N.keys()) if (a < b && same(a, b)) todo.push([a, b]);
+      for (let q = 0; q < todo.length; q++) {
+        let [a, b] = todo[q];
+        while (!triOf.has(a) || !triOf.get(a).size) { const r = [...members].find(([, l]) => l.includes(a)); if (!r) break; a = r[0]; }
+        while (!triOf.has(b) || !triOf.get(b).size) { const r = [...members].find(([, l]) => l.includes(b)); if (!r) break; b = r[0]; }
+        if (a === b || !nbr.get(a)?.has(b)) continue;
+        const onEdge = [...triOf.get(a)].filter(ti => tris[ti].owners.includes(b));
+        if (onEdge.length !== 2) continue;
+        const opp = new Set(onEdge.map(ti => tris[ti].owners.find(x => x !== a && x !== b)));
+        const common = [...nbr.get(a).keys()].filter(x => nbr.get(b).has(x));
+        if (opp.size !== 2 || common.length !== 2 || !common.every(x => opp.has(x))) continue; // link condition
+        for (const ti of onEdge) { link(ti, -1); live[ti] = false; }
+        for (const ti of [...triOf.get(b)]) { link(ti, -1); tris[ti] = { ...tris[ti], owners: tris[ti].owners.map(x => x === b ? a : x) }; link(ti, 1); }
+        members.set(a, [...(members.get(a) || [a]), ...(members.get(b) || [b])]); members.delete(b);
+        stats.collapsed++;
+        for (const c of nbr.get(a).keys()) if (same(a, c)) todo.push([a, c]);
+      }
+      const kept = tris.filter((_, ti) => live[ti]); tris.length = 0; tris.push(...kept);
+      for (const t of tris) if (t.owners.some(a => members.has(a))) t.x = tripleVertex(t.owners, t.anchor);
+      edgeCount.clear(); tris.forEach(t => countEdges(t, 1));
+      stats.dependentCollapsed = tris.filter(t => Math.abs(detOf(t.owners)) < DEP).length;
+      // Flip toward the envelope.
+      if (o.rank !== 'collapse') {
+        let sum = 0; for (const t of tris) sum += detOf(t.owners);
+        const sigma = sum < 0 ? -1 : 1; // orientation of the triangulation in the Gauss image
+        const det4 = (os, m) => { // det of the rows (n, -n.(t - m))
+          const M = os.map(a => { const { normal: n, point: t } = planes.get(a); return [n[0], n[1], n[2], -(n[0] * (t[0] - m[0]) + n[1] * (t[1] - m[1]) + n[2] * (t[2] - m[2]))]; });
+          const d3 = (r0, r1, r2, c0, c1, c2) => M[r0][c0] * (M[r1][c1] * M[r2][c2] - M[r1][c2] * M[r2][c1]) - M[r0][c1] * (M[r1][c0] * M[r2][c2] - M[r1][c2] * M[r2][c0]) + M[r0][c2] * (M[r1][c0] * M[r2][c1] - M[r1][c1] * M[r2][c0]);
+          return -M[3][0] * d3(0, 1, 2, 1, 2, 3) + M[3][1] * d3(0, 1, 2, 0, 2, 3) - M[3][2] * d3(0, 1, 2, 0, 1, 3) + M[3][3] * d3(0, 1, 2, 0, 1, 2);
+        };
+        const onEdge = new Map(), add = ti => { const o3 = tris[ti].owners; for (let r = 0; r < 3; r++) { const key = pairKey(o3[r], o3[(r + 1) % 3]); if (!onEdge.has(key)) onEdge.set(key, new Set()); onEdge.get(key).add(ti); } };
+        const del = ti => { const o3 = tris[ti].owners; for (let r = 0; r < 3; r++) onEdge.get(pairKey(o3[r], o3[(r + 1) % 3]))?.delete(ti); };
+        tris.forEach((_, ti) => add(ti));
+        const queue = [...onEdge.keys()];
+        stats.rankFlips = 0;
+        for (let guard = 0; queue.length && guard < 50 * tris.length; guard++) {
+          const key = queue.pop(), ts = onEdge.get(key);
+          if (!ts || ts.size !== 2) continue;
+          const [t1, t2] = [...ts], [e0, e1] = key.split(',').map(Number), o1 = tris[t1].owners;
+          const r = [0, 1, 2].find(i => { const p = o1[i], q = o1[(i + 2) % 3]; return (p === e0 && q === e1) || (p === e1 && q === e0); });
+          if (r === undefined) continue;
+          const a = o1[r], b = o1[(r + 1) % 3], c = o1[(r + 2) % 3], o2 = tris[t2].owners, s2 = o2.indexOf(a);
+          if (s2 < 0 || o2[(s2 + 1) % 3] !== c) continue;
+          const d = o2[(s2 + 2) % 3];
+          if (b === d || edgeCount.has(pairKey(b, d))) continue;
+          if (o.rank === 'det') { // experiment: the naive criterion, raise the smaller |det|
+            if (!convexQuad(a, b, c, d)) continue;
+            const before = Math.min(Math.abs(detOf([a, b, c])), Math.abs(detOf([a, c, d]))), after = Math.min(Math.abs(detOf([a, b, d])), Math.abs(detOf([b, c, d])));
+            if (!(Math.min(Math.abs(detOf([a, b, c])), Math.abs(detOf([a, c, d]))) < DEP) || !(after > before * 1.01 + 1e-12)) continue;
+          } else {
+          const ty = [etypeOf(a, b), etypeOf(b, c), etypeOf(c, d), etypeOf(d, a)];
+          const kappa = ty.every(e => e <= 0) && ty.includes(-1) ? -1 : ty.every(e => e >= 0) && ty.includes(1) ? 1 : 0;
+          if (!kappa) continue;
+          const m = anchorOf3([a, b, c, d].slice(0, 3)), scale = Math.max(...[a, b, c, d].map(u => Math.sqrt(dist2(m, planes.get(u).point)))) || 1;
+          if (!(kappa * sigma * det4([a, b, c, d], m) < -1e-9 * scale)) continue;
+          if (!(sigma * detOf([a, b, d]) > 1e-12) || !(sigma * detOf([b, c, d]) > 1e-12)) continue;
+          }
+          del(t1); del(t2); countEdges(tris[t1], -1); countEdges(tris[t2], -1);
+          for (const [ti, os] of [[t1, [a, b, d]], [t2, [b, c, d]]]) { const m3 = anchorOf3(os); tris[ti] = { owners: os, x: tripleVertex(os, m3), anchor: m3 }; }
+          add(t1); add(t2); countEdges(tris[t1], 1); countEdges(tris[t2], 1); stats.rankFlips++;
+          for (const [p, q] of [[a, b], [b, c], [c, d], [d, a]]) queue.push(pairKey(p, q));
+        }
+      }
+      stats.dependentAfter = tris.filter(t => Math.abs(detOf(t.owners)) < DEP).length;
+    }
+
     // 5. Vertices, clipped to the footprint. A triangle's vertex is the exact intersection of its
     //    three planes when that lies within the trust radius of its anchor (the trust factor times the
     //    distance to the farthest of its tangent points). Otherwise the vertex is replaced by a small
@@ -959,7 +1066,7 @@
       const os = t.owners, m = t.anchor, A = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], r = [0, 0, 0];
       for (const a of os) { const { normal: n, point: tp } = planes.get(a), c = n[0] * tp[0] + n[1] * tp[1] + n[2] * tp[2];
         for (let i = 0; i < 3; i++) { r[i] += n[i] * c; for (let j = 0; j < 3; j++) A[i][j] += n[i] * n[j]; } }
-      const x = qefTruncated(A, r, m, o.tau), rho = trustRadius(m, os, planes, o.trust);
+      const x = qefTruncated(A, r, m, o.tau), rho = rhoOf(m, os);
       if (!o.chamfer) { vid[ti] = { all: verts.length }; verts.push(t.x); anchors.push(m); vertOwners.push(os); return; }
       if (Math.sqrt(dist2(x, m)) <= rho) { vid[ti] = { all: verts.length }; verts.push(x); anchors.push(m); vertOwners.push(os); return; }
       stats.chamfers++;
@@ -1032,7 +1139,7 @@
     polys.push(...chamferPolys);
     if (agree < 0) for (const P of polys) P.verts.reverse(); // face the + side
     stats.facelessOwners = [...planes.keys()].filter(a => !byOwner.has(a)).length;
-    return { verts, anchors, vertOwners, polys, patchStats: stats };
+    return { verts, anchors, vertOwners, polys, patchStats: stats, triangles: tris.map(t => t.owners), triVerts: vid };
   }
 
   const api = { recoverSurface, triangulatePatches, PATCH_DEFAULTS, extendOwnFaces, mirroredSites, contourNeighbors, clipTangentPlanes, CLIP_DEFAULTS };
