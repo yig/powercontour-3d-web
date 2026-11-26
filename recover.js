@@ -598,7 +598,7 @@
   // as possible to them on a saddle (mixed edges), which plays the role of an asymptotic decider.
   // Contour vertices where three or more own faces meet with no step between them are loops too.
   // The output faces are the duals: each own face's polygon is the cycle of triangles around it.
-  const PATCH_DEFAULTS = { tau: 1e-12, trust: 2 };
+  const PATCH_DEFAULTS = { tau: 1e-12, trust: 2, chamfer: true, stitch: true };
   const DP_MAX = 24; // longer loops, and patches with holes, keep the partition's junctions
   function triangulatePatches(sites, signs, owner, cells, planes, opts) {
     const o = { ...PATCH_DEFAULTS, ...opts };
@@ -623,7 +623,26 @@
       }
       patches.push(P);
     });
-    const loops = [], stats0 = { partitioned: 0 };
+    const loops = [], stats0 = { partitioned: 0, stitched: 0, flippedPatches: 0, flips: 0, chamfers: 0, pairsLimited: 0 };
+    const f = (a, x) => { const P = planes.get(a), n = P.normal, t = P.point; return n[0] * (x[0] - t[0]) + n[1] * (x[1] - t[1]) + n[2] * (x[2] - t[2]); };
+    // Edge type of two faces: convex (-1) if each tangent point lies below the other's plane,
+    // concave (+1) if above, flat (0) if neither (coplanar planes).
+    const etypeOf = (p, q) => {
+      if (p === q) return 0;
+      const s = f(p, planes.get(q).point) + f(q, planes.get(p).point), scale = dist2(planes.get(p).point, planes.get(q).point);
+      return s < -1e-9 * scale ? -1 : s > 1e-9 * scale ? 1 : 0;
+    };
+    const kindOf = types => { const cv = types.includes(-1), cc = types.includes(1); return cv && cc ? 'saddle' : cv ? 'convex' : cc ? 'concave' : 'flat'; };
+    const pairKey = (a, b) => a < b ? `${a},${b}` : `${b},${a}`;
+    // The vertex of three planes for the dynamic programs' costs, anchored at m: their intersection,
+    // limited to the trust radius (the final placement is in step 5).
+    const tripleVertex = (os, m) => {
+      const A = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], r = [0, 0, 0];
+      for (const a of os) { const { normal: n, point: t } = planes.get(a), c = n[0] * t[0] + n[1] * t[1] + n[2] * t[2];
+        for (let p = 0; p < 3; p++) { r[p] += n[p] * c; for (let q = 0; q < 3; q++) A[p][q] += n[p] * n[q]; } }
+      return qefTruncated(A, r, m, o.tau, trustRadius(m, os, planes, o.trust));
+    };
+    const meanOf = us => { const m = [0, 0, 0]; for (const u of us) for (let c = 0; c < 3; c++) m[c] += pts[u][c] / us.length; return m; };
     patches.forEach((P, pi) => {
       const out = new Map();
       for (const fi of P.faces) {
@@ -663,7 +682,7 @@
               passed.push(H); G = H;
             }
             if (!ok) continue;
-            for (const H of passed) if (faces[H].green || (withSteps && !patches[patchOf[H]]?.dp)) items.push({ ow: faces[H].label, at: e.v, at2: e.v });
+            for (const H of passed) if (faces[H].green || (withSteps && !patches[patchOf[H]]?.own)) items.push({ ow: faces[H].label, at: e.v, at2: e.v });
             break;
           }
         });
@@ -675,17 +694,31 @@
         if (seq.length > 1 && seq[0].ow === seq[seq.length - 1].ow) { seq[0].enter = seq[seq.length - 1].enter; seq.pop(); }
         return seq;
     };
-    // A single loop of 3 to DP_MAX own faces is triangulated from its planes. Otherwise (a patch with
-    // holes, such as a flat side of the box with its own faces as islands, or a long loop) the patch
-    // keeps the partition's labels, and its vertices are the partition's junctions.
+    // How each patch is triangulated:
+    //  - one loop of 3 to DP_MAX own faces: the polygon dynamic program (step 3);
+    //  - two loops (a ring of steps, or an island face inside steps): stitching the two loops, the
+    //    contour tiling dynamic program of Fuchs, Kedem and Uselton (step 3);
+    //  - otherwise (more loops, such as a flat side of the box with its own faces as islands, or a
+    //    long loop): the partition's junctions, the restricted Delaunay triangles of the tangent
+    //    points, then flipped toward the planes' envelope if the patch is convex or concave (step 4).
     patches.forEach((P, pi) => {
-      const seqs = P.rings.map(ring => ringSeq(pi, ring, false)).filter(q => q.length >= 2);
-      if (seqs.length === 1 && P.rings.length === 1 && seqs[0].length >= 3 && seqs[0].length <= DP_MAX) P.dp = true;
+      const seqs = P.rings.map(ring => ringSeq(pi, ring, false));
+      P.kind = kindOf(seqs.flatMap(q => q.map((p, i) => etypeOf(p.ow, q[(i + 1) % q.length].ow))));
+      P.boundary = new Set(seqs.flatMap(q => q.length > 1 ? q.map((p, i) => pairKey(p.ow, q[(i + 1) % q.length].ow)) : []));
+      if (P.rings.length === 1 && seqs[0].length >= 3 && seqs[0].length <= DP_MAX) P.own = 'dp';
+      else if (o.stitch && P.rings.length === 2 && seqs.every(q => q.length >= 1) && seqs.some(q => q.length >= 2) && seqs[0].length * seqs[1].length * Math.min(seqs[0].length, seqs[1].length) <= 2e5) P.own = 'stitch';
       else stats0.partitioned++;
     });
-    patches.forEach((P, pi) => { if (P.dp) loops.push({ seq: ringSeq(pi, P.rings[0], true), patch: pi }); });
-    const inDP = new Uint8Array(pts.length);
-    patches.forEach(P => { if (P.dp) for (const fi of P.faces) for (const u of faces[fi].vs) inDP[u] = 1; });
+    patches.forEach((P, pi) => {
+      if (P.own === 'dp') loops.push({ seq: ringSeq(pi, P.rings[0], true), patch: pi });
+      if (P.own === 'stitch') {
+        const [A, B] = P.rings.map(ring => ringSeq(pi, ring, true)).sort((x, y) => y.length - x.length);
+        if (A.length >= 2 && B.length >= 1) { loops.push({ seq: A, inner: B, patch: pi, stitch: true }); stats0.stitched++; }
+      }
+    });
+    const inDP = new Uint8Array(pts.length), vPatch = new Int32Array(pts.length).fill(-1);
+    patches.forEach(P => { if (P.own) for (const fi of P.faces) for (const u of faces[fi].vs) inDP[u] = 1; });
+    patches.forEach((P, pi) => { if (!P.own) for (const fi of P.faces) for (const u of faces[fi].vs) vPatch[u] = pi; });
     // Junctions: contour vertices outside the triangulated patches where >= 3 labels meet (own faces
     // meeting with no step between them, and the junctions of the partition).
     const label = F => F.label;
@@ -705,20 +738,78 @@
       } while (fi !== inc[0][0] && ++guard < 64);
       if (seq.length > 1 && seq[0].ow === seq[seq.length - 1].ow) seq.pop();
       // This rotation is clockwise seen from the + side; patch loops are counterclockwise.
-      if (seq.length >= 3) loops.push({ seq: seq.reverse(), patch: -1 });
+      if (seq.length >= 3) loops.push({ seq: seq.reverse(), patch: -1, junctionOf: vPatch[v] });
     });
 
     // 3. Triangulate each loop.
-    const f = (a, x) => { const P = planes.get(a), n = P.normal, t = P.point; return n[0] * (x[0] - t[0]) + n[1] * (x[1] - t[1]) + n[2] * (x[2] - t[2]); };
     const stats = { patches: patches.length, loops: loops.length, junctions: loops.filter(L => L.patch < 0).length, byK: {}, convex: 0, concave: 0, saddle: 0, saddleMaxMin: 0, saddleMinMax: 0, flat: 0, ...stats0 };
     const tris = []; // { owners: [a, b, c], x, anchor }
     // Pairs already adjacent: consecutive faces on some loop. A diagonal between such a pair would
     // make them adjacent twice (a non-manifold edge), so it is avoided.
-    const pairKey = (a, b) => a < b ? `${a},${b}` : `${b},${a}`, loopEdges = new Map();
-    for (const L of loops) L.seq.forEach((p, i) => { const key = pairKey(p.ow, L.seq[(i + 1) % L.seq.length].ow); loopEdges.set(key, (loopEdges.get(key) || 0) + 1); });
+    const loopEdges = new Map();
+    for (const L of loops) for (const q of [L.seq, L.inner || []]) if (q.length > 1) q.forEach((p, i) => { const key = pairKey(p.ow, q[(i + 1) % q.length].ow); loopEdges.set(key, (loopEdges.get(key) || 0) + 1); });
     const FORBID = 1e6;
+
+    // Envelope cost of a vertex x of three faces against the other faces of the patch: how far it is
+    // on the wrong side of their planes (convex: f <= 0, concave: f >= 0), or off them on a saddle.
+    const envCost = (kind, x, os, others) => {
+      let c = 0;
+      for (const d of others) {
+        if (os.includes(d)) continue;
+        const v = f(d, x);
+        c += kind === 'convex' ? Math.max(0, v) : kind === 'concave' ? Math.max(0, -v) : kind === 'saddle' ? Math.abs(v) : 0;
+      }
+      return c;
+    };
+
+    // Stitch the two loops of a patch (Fuchs, Kedem and Uselton 1977). Both loops have the patch on
+    // their left, so sweeping around it goes forward along A and backward along B. Each step adds a
+    // triangle with an edge of one loop and a corner on the other: (a_i, a_i+1, b_j) or
+    // (b_j+1, b_j, a_i) with B reversed. All starting pairs are tried; an island (B of one face) is
+    // a fan.
+    function stitch(L) {
+      const A = L.seq, B = L.inner.slice().reverse(), k = A.length, m = B.length;
+      const owners = [...new Set([...A, ...B].map(p => p.ow))];
+      const types = [A, L.inner].flatMap(q => q.length > 1 ? q.map((p, i) => etypeOf(p.ow, q[(i + 1) % q.length].ow)) : []);
+      const kind = kindOf(types);
+      stats[kind]++;
+      const cache = new Map();
+      const tri = (pa, pb, pc, spans) => { // positions; spans: the two new interior pairs
+        const os = [pa.ow, pb.ow, pc.ow];
+        if (os[0] === os[1] || os[1] === os[2] || os[0] === os[2]) return { cost: Infinity };
+        const key = os.join(',');
+        if (!cache.has(key)) {
+          const anc = meanOf([pa.enter, pa.leave, pb.enter, pb.leave, pc.enter, pc.leave]), x = tripleVertex(os, anc);
+          cache.set(key, { owners: os, x, anchor: anc, cost: envCost(kind, x, os, owners) });
+        }
+        const t = cache.get(key);
+        return { ...t, cost: t.cost + spans.filter(([p, q]) => loopEdges.has(pairKey(p, q))).length * FORBID };
+      };
+      if (m === 1) { for (let i = 0; i < k; i++) { const t = tri(A[i], A[(i + 1) % k], B[0], []); if (t.x) tris.push(t); } return; }
+      let best = null;
+      for (let j0 = 0; j0 < m; j0++) {
+        const C = Array.from({ length: k + 1 }, () => new Float64Array(m + 1).fill(Infinity)), S = Array.from({ length: k + 1 }, () => new Int8Array(m + 1));
+        C[0][0] = 0;
+        for (let i = 0; i <= k; i++) for (let j = 0; j <= m; j++) {
+          if (C[i][j] === Infinity) continue;
+          const a = A[i % k], b = B[(j0 + j) % m];
+          if (i < k) { const t = tri(a, A[(i + 1) % k], b, [[A[(i + 1) % k].ow, b.ow]]), c = C[i][j] + t.cost; if (c < C[i + 1][j]) { C[i + 1][j] = c; S[i + 1][j] = 1; } }
+          if (j < m) { const b2 = B[(j0 + j + 1) % m], t = tri(b2, b, a, [[b2.ow, a.ow]]), c = C[i][j] + t.cost; if (c < C[i][j + 1]) { C[i][j + 1] = c; S[i][j + 1] = 2; } }
+        }
+        if (C[k][m] < Infinity && (!best || C[k][m] < best.cost)) best = { cost: C[k][m], S, j0 };
+      }
+      if (!best) return;
+      for (let i = k, j = m; i > 0 || j > 0;) {
+        const b = B[(best.j0 + j) % m];
+        if (best.S[i][j] === 1) { const t = tri(A[i - 1], A[i % k], B[(best.j0 + j) % m], []); if (t.x) tris.push(t); i--; }
+        else { const t = tri(B[(best.j0 + j) % m], B[(best.j0 + j - 1) % m], A[i % k], []); if (t.x) tris.push(t); j--; }
+        void b;
+      }
+    }
+
     for (const L of loops) {
-      const seq = L.seq, k = seq.length;
+      if (L.stitch) { stitch(L); continue; }
+      const seq = L.seq, k = seq.length, tri0 = tris.length;
       stats.byK[k] = (stats.byK[k] || 0) + 1;
       // Edge types around the loop: convex (-1) if each tangent point lies below the other's plane,
       // concave (+1) if above, flat (0) if neither (coplanar planes).
@@ -770,7 +861,7 @@
         for (const [p, q] of [[i, j], [j, l], [i, l]]) if ((q - p) % k !== 1 && (p - q + k) % k !== 1 && loopEdges.has(pairKey(seq[p].ow, seq[q].ow))) forbid += FORBID;
         return { x: qefTruncated(A, r, anc, o.tau, trustRadius(anc, os, planes, o.trust)), anchor: anc, owners: os, forbid };
       };
-      if (k > DP_MAX) { for (let l = 1; l + 1 < k; l++) { const t = vertexOf(0, l, l + 1); if (t) tris.push(t); } continue; } // a junction of very many labels: fan
+      if (k > DP_MAX) { for (let l = 1; l + 1 < k; l++) { const t = vertexOf(0, l, l + 1); if (t) { t.patch = L.junctionOf; tris.push(t); } } continue; } // a junction of very many labels: fan
       const V = new Map(), vert = (i, l, j) => { const key = `${i},${l},${j}`; if (!V.has(key)) V.set(key, vertexOf(i, l, j)); return V.get(key); };
       // Minimum-cost triangulation of the polygon 0 .. k-1 (Klincsek's O(k^3) dynamic program), once
       // per reading. For a saddle this is the decider: a reading with at most two groups against at least
@@ -795,15 +886,103 @@
       if (kind === 'saddle') stats[best.sgn < 0 ? 'saddleMaxMin' : 'saddleMinMax']++;
       const collect = (i, j) => { if (j - i < 2) return; const l = best.S[i][j], t = vert(i, l, j); if (t) tris.push(t); collect(i, l); collect(l, j); };
       collect(0, k - 1);
+      if (L.junctionOf >= 0) for (let t = tri0; t < tris.length; t++) tris[t].patch = L.junctionOf;
     }
 
-    // 4. Faces: the triangles around each owner. Every loop is counterclockwise seen from the + side
-    //    and the dynamic program keeps loop order, so each triangle (a, b, c) is oriented; around a it
+    // 4. Patches kept from the partition: flip their triangles toward the envelope of their planes
+    //    (Lawson's algorithm). For triangles (a, b, c) and (a, c, d) sharing edge ac, the edge is
+    //    right when plane d is on the envelope's side of P_a ∩ P_b ∩ P_c (on a quadric, the in-circle
+    //    test in the metric Q). A flip needs a convex quad, may not create an edge that exists, and
+    //    is made when it lowers the violation. Flat patches already have the Delaunay tie-break, and
+    //    saddle patches keep it too (flips do not settle there).
+    const edgeCount = new Map();
+    const countEdges = (t, d) => { const [a, b, c] = t.owners; for (const [p, q] of [[a, b], [b, c], [c, a]]) { const key = pairKey(p, q); edgeCount.set(key, (edgeCount.get(key) || 0) + d); if (!edgeCount.get(key)) edgeCount.delete(key); } };
+    tris.forEach(t => countEdges(t, 1));
+    const ownerAnchor = new Map();
+    tris.forEach(t => t.owners.forEach(a => { const s = ownerAnchor.get(a) || [0, 0, 0, 0]; for (let c = 0; c < 3; c++) s[c] += t.anchor[c]; s[3]++; ownerAnchor.set(a, s); }));
+    const anchorOf3 = os => { const m = [0, 0, 0]; for (const a of os) { const s = ownerAnchor.get(a); for (let c = 0; c < 3; c++) m[c] += s[c] / s[3] / 3; } return m; };
+    const convexQuad = (a, b, c, d) => {
+      const N = [0, 0, 0]; for (const ow of [a, b, c, d]) { const n = planes.get(ow).normal; for (let i = 0; i < 3; i++) N[i] += n[i]; }
+      const P = [a, b, c, d].map(ow => planes.get(ow).point);
+      const cr = (p0, p1, p2) => { const u = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]], w = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+        return (u[1] * w[2] - u[2] * w[1]) * N[0] + (u[2] * w[0] - u[0] * w[2]) * N[1] + (u[0] * w[1] - u[1] * w[0]) * N[2]; };
+      const sg = [cr(P[0], P[1], P[2]), cr(P[1], P[2], P[3]), cr(P[2], P[3], P[0]), cr(P[3], P[0], P[1])];
+      return sg.every(x => x > 0) || sg.every(x => x < 0);
+    };
+    patches.forEach((P, pi) => {
+      if (P.own || (P.kind !== 'convex' && P.kind !== 'concave')) return;
+      const T = tris.map((t, ti) => t.patch === pi ? ti : -1).filter(ti => ti >= 0);
+      if (T.length < 2) return;
+      stats.flippedPatches++;
+      const sg = P.kind === 'convex' ? 1 : -1, vi = v => Math.max(0, sg * v);
+      const X = os => tripleVertex(os, anchorOf3(os));
+      const onEdge = new Map(), add = ti => { const o3 = tris[ti].owners; for (let r = 0; r < 3; r++) { const key = pairKey(o3[r], o3[(r + 1) % 3]); if (!onEdge.has(key)) onEdge.set(key, new Set()); onEdge.get(key).add(ti); } };
+      const del = ti => { const o3 = tris[ti].owners; for (let r = 0; r < 3; r++) onEdge.get(pairKey(o3[r], o3[(r + 1) % 3]))?.delete(ti); };
+      T.forEach(add);
+      const queue = [...onEdge.keys()].filter(key => !P.boundary.has(key));
+      for (let guard = 0; queue.length && guard < 20 * T.length + 100; guard++) {
+        const key = queue.pop(), ts = onEdge.get(key);
+        if (!ts || ts.size !== 2 || P.boundary.has(key)) continue;
+        const [t1, t2] = [...ts], [e0, e1] = key.split(',').map(Number), o1 = tris[t1].owners;
+        const r = [0, 1, 2].find(i => { const p = o1[i], q = o1[(i + 2) % 3]; return (p === e0 && q === e1) || (p === e1 && q === e0); });
+        if (r === undefined) continue;
+        const a = o1[r], b = o1[(r + 1) % 3], c = o1[(r + 2) % 3], o2 = tris[t2].owners, s2 = o2.indexOf(a);
+        if (s2 < 0 || o2[(s2 + 1) % 3] !== c) continue;
+        const d = o2[(s2 + 2) % 3];
+        if (b === d || edgeCount.has(pairKey(b, d)) || !convexQuad(a, b, c, d)) continue;
+        const before = vi(f(d, X([a, b, c]))) + vi(f(b, X([a, c, d]))), after = vi(f(c, X([a, b, d]))) + vi(f(a, X([b, c, d])));
+        if (!(after < before - 1e-12)) continue;
+        del(t1); del(t2); countEdges(tris[t1], -1); countEdges(tris[t2], -1);
+        for (const [ti, os] of [[t1, [a, b, d]], [t2, [b, c, d]]]) { const m = anchorOf3(os); tris[ti] = { owners: os, x: tripleVertex(os, m), anchor: m, patch: pi }; }
+        add(t1); add(t2); countEdges(tris[t1], 1); countEdges(tris[t2], 1); stats.flips++;
+        for (const [p, q] of [[a, b], [b, c], [c, d], [d, a]]) { const e = pairKey(p, q); if (!P.boundary.has(e)) queue.push(e); }
+      }
+    });
+
+    // 5. Vertices, clipped to the footprint. A triangle's vertex is the exact intersection of its
+    //    three planes when that lies within the trust radius of its anchor (the trust factor times the
+    //    distance to the farthest of its tangent points). Otherwise the vertex is replaced by a small
+    //    chamfer: one point on each line P_a ∩ P_b, the point of that line nearest the anchor, joined
+    //    by an extra face. Every tangent-plane face then stays exactly planar, except where two planes
+    //    are so nearly parallel that their line is beyond the trust radius too: that point stays within
+    //    it, on the pair's average plane (counted in pairsLimited).
+    const verts = [], anchors = [], vertOwners = [], vid = tris.map(() => null), chamferPolys = [];
+    const pairPoint = (p, q, m, rho) => {
+      const A = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], r = [0, 0, 0];
+      for (const a of [p, q]) { const { normal: n, point: t } = planes.get(a), c = n[0] * t[0] + n[1] * t[1] + n[2] * t[2];
+        for (let i = 0; i < 3; i++) { r[i] += n[i] * c; for (let j = 0; j < 3; j++) A[i][j] += n[i] * n[j]; } }
+      const y = qefTruncated(A, r, m, o.tau, rho);
+      if (dist2(y, qefTruncated(A, r, m, o.tau)) > 1e-24) stats.pairsLimited++; // nearly parallel: on the pair's average plane
+      return y;
+    };
+    tris.forEach((t, ti) => {
+      const os = t.owners, m = t.anchor, A = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], r = [0, 0, 0];
+      for (const a of os) { const { normal: n, point: tp } = planes.get(a), c = n[0] * tp[0] + n[1] * tp[1] + n[2] * tp[2];
+        for (let i = 0; i < 3; i++) { r[i] += n[i] * c; for (let j = 0; j < 3; j++) A[i][j] += n[i] * n[j]; } }
+      const x = qefTruncated(A, r, m, o.tau), rho = trustRadius(m, os, planes, o.trust);
+      if (!o.chamfer) { vid[ti] = { all: verts.length }; verts.push(t.x); anchors.push(m); vertOwners.push(os); return; }
+      if (Math.sqrt(dist2(x, m)) <= rho) { vid[ti] = { all: verts.length }; verts.push(x); anchors.push(m); vertOwners.push(os); return; }
+      stats.chamfers++;
+      const ids = {};
+      for (let e = 0; e < 3; e++) { const p = os[e], q = os[(e + 1) % 3]; ids[pairKey(p, q)] = verts.length; verts.push(pairPoint(p, q, m, rho)); anchors.push(m); vertOwners.push([p, q]); }
+      vid[ti] = { pair: ids };
+      chamferPolys.push({ owner: -1, chamfer: true, normal: (() => { const n = [0, 0, 0]; for (const a of os) { const v = planes.get(a).normal; for (let c = 0; c < 3; c++) n[c] += v[c] / 3; } return n; })(),
+        verts: [ids[pairKey(os[0], os[1])], ids[pairKey(os[1], os[2])], ids[pairKey(os[2], os[0])]], holes: [] });
+    });
+    // The vertices a triangle (a, b, c) contributes to a's face: entering from b, leaving toward c.
+    const ringVerts = (ti, a) => {
+      const v = vid[ti]; if (v.all !== undefined) return [v.all];
+      const o3 = tris[ti].owners, r = o3.indexOf(a);
+      return [v.pair[pairKey(a, o3[(r + 1) % 3])], v.pair[pairKey(a, o3[(r + 2) % 3])]];
+    };
+
+    // 6. Faces: the triangles around each owner. Every loop is counterclockwise seen from the + side
+    //    and the dynamic programs keep loop order, so each triangle (a, b, c) is oriented; around a it
     //    says "after neighbor b comes c". Following that order gives consistently oriented faces.
-    const verts = tris.map(t => t.x), anchors = tris.map(t => t.anchor), vertOwners = tris.map(t => t.owners);
+    const triAnchor = tris.map(t => t.anchor);
     // Twins: the triangle with directed edge p -> q is glued to one with q -> p. Where the same faces
     // meet at two places there are two of each; they are paired by nearest anchors.
-    const dir = new Map(); // "p,q" -> [[triangle, rotation]]
+    const dir = new Map(); // "p,q" -> [triangle]
     tris.forEach((t, ti) => { for (let r = 0; r < 3; r++) { const key = `${t.owners[r]},${t.owners[(r + 1) % 3]}`; if (!dir.has(key)) dir.set(key, []); dir.get(key).push(ti); } });
     const twin = new Map(); // "triangle,p,q" -> triangle across that edge
     for (const [key, list] of dir) {
@@ -812,14 +991,12 @@
       const fwd = list.slice();
       while (fwd.length && back.length) {
         let bi = 0, bj = 0, bd = Infinity;
-        fwd.forEach((t, i) => back.forEach((u, j) => { const d = dist2(anchors[t], anchors[u]); if (d < bd) { bd = d; bi = i; bj = j; } }));
+        fwd.forEach((t, i) => back.forEach((u, j) => { const d = dist2(triAnchor[t], triAnchor[u]); if (d < bd) { bd = d; bi = i; bj = j; } }));
         const t = fwd.splice(bi, 1)[0], u = back.splice(bj, 1)[0];
         twin.set(`${t},${p},${q}`, u); twin.set(`${u},${q},${p}`, t);
       }
     }
-    const edgeUse = new Map();
-    tris.forEach(t => { const [a, b, c] = t.owners; for (const [p, q] of [[a, b], [b, c], [c, a]]) { const key = p < q ? `${p},${q}` : `${q},${p}`; edgeUse.set(key, (edgeUse.get(key) || 0) + 1); } });
-    stats.nonManifoldEdges = [...edgeUse.values()].filter(n => n !== 2).length;
+    stats.nonManifoldEdges = [...edgeCount.values()].filter(n => n !== 2).length;
     // Around owner a: triangle (a, b, c) is followed by the triangle across its edge c -> a, which
     // contains a -> c, i.e. is (a, c, d).
     const polys = []; stats.openFans = 0; stats.splitFans = 0;
@@ -833,24 +1010,26 @@
         const ring = []; let t = t0, closed = false;
         while (t !== undefined && !used.has(t)) {
           used.add(t); ring.push(t);
-          const o = tris[t].owners, r = o.indexOf(a), c = o[(r + 2) % 3];
+          const o3 = tris[t].owners, r = o3.indexOf(a), c = o3[(r + 2) % 3];
           t = twin.get(`${t},${c},${a}`);
           if (t === t0) closed = true;
         }
         if (!closed) { // walk the other way to collect the whole open fan
           stats.openFans++;
           let u = t0;
-          for (;;) { const o = tris[u].owners, r = o.indexOf(a), b = o[(r + 1) % 3], v = twin.get(`${u},${a},${b}`); if (v === undefined || used.has(v)) break; used.add(v); ring.unshift(v); u = v; }
+          for (;;) { const o3 = tris[u].owners, r = o3.indexOf(a), b = o3[(r + 1) % 3], v = twin.get(`${u},${a},${b}`); if (v === undefined || used.has(v)) break; used.add(v); ring.unshift(v); u = v; }
         }
-        if (ring.length < 3) continue;
+        const vs = ring.flatMap(ti => ringVerts(ti, a));
+        if (vs.length < 3) continue;
         cycles++;
-        const V = ring.map(ti => verts[ti]), nn = [0, 0, 0], n = planes.get(a).normal;
+        const V = vs.map(k => verts[k]), nn = [0, 0, 0], n = planes.get(a).normal;
         V.forEach((p, i) => { const q = V[(i + 1) % V.length]; nn[0] += p[1] * q[2] - p[2] * q[1]; nn[1] += p[2] * q[0] - p[0] * q[2]; nn[2] += p[0] * q[1] - p[1] * q[0]; });
         agree += Math.sign(nn[0] * n[0] + nn[1] * n[1] + nn[2] * n[2]);
-        polys.push({ owner: a, normal: n, verts: ring, holes: [] });
+        polys.push({ owner: a, normal: n, verts: vs, holes: [] });
       }
       if (cycles > 1) stats.splitFans++;
     }
+    polys.push(...chamferPolys);
     if (agree < 0) for (const P of polys) P.verts.reverse(); // face the + side
     stats.facelessOwners = [...planes.keys()].filter(a => !byOwner.has(a)).length;
     return { verts, anchors, vertOwners, polys, patchStats: stats };
