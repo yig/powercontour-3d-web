@@ -12,6 +12,8 @@ You can also add one **tangent point** per sample: the closest point on the surf
 
 *Contract contour regions* (and its variant *Extend own faces*; see [RECOVERY.md](RECOVERY.md)) builds a polygon mesh with one face per sample, lying in its tangent plane. The power contour supplies the connectivity. The face between a sample and its own tangent point lies in that tangent plane. Every other contour face is given to the nearer of its two samples, and the resulting regions on the contour become the faces of the new mesh. Each vertex is where three or more tangent planes meet, so sharp edges and corners (the box, the two-sphere crease) come out sharp. Red outlines mark holes, where a region is not a disc. Set *Sphere scale* to about 0.1 for recovery: it shrinks each sample's sphere toward its tangent point, which leaves every own face exactly in its tangent plane but makes the other faces thin, so they collapse cleanly.
 
+*Merge steps into faces* is meant for **tangent balls** (check *Tangent balls instead of sample spheres*): each sample's sphere is replaced by a ball tangent at its tangent point, on the convex side, as large as possible without containing another tangent point. The other contour faces then nearly lie in the tangent planes, so each is merged into the face of the nearer plane, and the cells' own vertices are kept: no plane intersections, so no far vertices. It is the most accurate method on smooth and developable shapes (try *Cylinder*), but its faces are planar only up to the merged steps. See [RECOVERY.md](RECOVERY.md), Approach 4.
+
 *Clip tangent planes* uses only the tangent points: it finds neighbors with the power diagram of mirrored pairs `t ± δn` (check *Mirrored pairs* to see that contour), then clips each tangent plane by its neighbors' half-spaces. Corners and edges come out with no feature detection: the face planes cut each other there, and tangent points on corners and edges (orange) get tiny faces. Curved creases can optionally be detected with thresholds (sliders). See `ARCHITECTURE.md`.
 
 ## Running
@@ -69,7 +71,7 @@ Red means `d > 0`, blue means `d < 0`, and the contour is gold. The recovered su
 
 ## More
 
-- [RECOVERY.md](RECOVERY.md): the structure of the contour (own faces and steps), the two ways to contract it to one face per tangent point, and the choice of sphere scale and dependent-plane threshold.
+- [RECOVERY.md](RECOVERY.md): the structure of the contour (own faces and steps), the ways to turn it into one face per tangent point (including tangent balls, Approach 4), and the choice of sphere scale and dependent-plane threshold.
 - [ARCHITECTURE.md](ARCHITECTURE.md): code structure, the math, and the clipping algorithm.
 - [AGENTS.md](AGENTS.md): the original spec.
 - Issues are tracked with [git-bug](https://github.com/git-bug/git-bug): `git bug bug`.

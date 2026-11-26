@@ -1,6 +1,6 @@
 # Recovering a surface from the power contour
 
-This note describes the structure of the power contour of samples plus tangent points, and three ways to turn it into a surface with one face per tangent point: *Contract contour regions*, *Extend own faces* and *Triangulate step patches*. Code: `recover.js` (`recoverSurface`, `extendOwnFaces`, `triangulatePatches`, `qefTruncated`). A third method, *Clip tangent planes*, is described in `ARCHITECTURE.md`.
+This note describes the structure of the power contour of samples plus tangent points, and four ways to turn it into a surface with one face per tangent point: *Contract contour regions*, *Extend own faces*, *Triangulate step patches*, and *Merge steps into faces* on a diagram with different generators (*tangent balls*). Code: `recover.js` (`recoverSurface`, `extendOwnFaces`, `triangulatePatches`, `tangentBallSites`, `mergeSteps`, `qefTruncated`). Another method, *Clip tangent planes*, is described in `ARCHITECTURE.md`.
 
 ## Setup
 
@@ -229,6 +229,149 @@ Triangulate step patches uses three controls: the sphere scale `s` (it changes t
 - **The crease's worst vertices** (0.16 off with uniform samples, against 0.067 for Contract contour regions).
 
 References: F. Aurenhammer, Power diagrams: properties, algorithms and applications, *SIAM J. Computing* 16(1), 1987. H. Fuchs, Z. M. Kedem and S. P. Uselton, Optimal surface reconstruction from planar contours, *Communications of the ACM* 20(10), 1977. G. T. Klincsek, Minimal triangulations of polygonal domains, *Annals of Discrete Mathematics* 9, 1980. G. M. Nielson and B. Hamann, The asymptotic decider: resolving the ambiguity in marching cubes, *Proc. IEEE Visualization '91*, 1991. S. Ovchinnikov, Max-min representation of piecewise linear functions, *Beiträge zur Algebra und Geometrie* 43(1), 2002.
+
+## Approach 4: Tangent balls (`tangentBallSites`, `mergeSteps`)
+
+Approaches 1–3 keep the power diagram and remove its steps afterwards, by intersecting tangent planes. Where three neighboring normals are nearly dependent (cylinders, cones, the torus's top and bottom circles), those intersections are far away, and the trust region or chamfers have to stop them. This approach changes the generators instead, so that the steps become small, and then uses the cells' own vertices: no plane intersection is ever computed.
+
+### Theory
+
+**1. Any ball tangent at `t_a` keeps the own face.** Give owner `a` a ball of radius `λ` tangent to `P_a` at `t_a` on side `σ ∈ {+1, −1}`: center `t_a + σλ n_a`, weight `λ²`, sign `σ`; and keep its tangent point (weight 0, sign `−σ`). Then
+
+```
+π_ball(x) = |x − t_a|² − 2σλ f_a(x),     π_t(x) = |x − t_a|²,
+```
+
+so by (1) of *Structure* their bisector is `P_a` for every `λ` and `σ`, and the own face is still `P_a ∩ C_a`. The sample spheres at sphere scale `s` are the special case `λ = s|d_a|`, `σ = sign d_a`. The power contour is still the boundary of `{F > 0}`, where `F(x) = f_{a(x)}(x)` and `a(x)` is the super cell containing `x`: own faces where `F` crosses 0 inside a super cell, steps on the walls where `F` jumps across 0. So the tangent sites are still wanted: they split each owner's region along its plane.
+
+**2. No choice of balls puts `P_a ∩ P_b` in the walls.** On `P_a`, `f_a = 0`, so every site tangent at `t_a` has power `|x − t_a|²` there (plus a constant per owner if weights are shifted). On the line `L = P_a ∩ P_b` both owners therefore compare `|x − t_a|²` with `|x − t_b|² + const`: the difference is linear along `L` with slope `2 (t_b − t_a)·e`, `e` the direction of `L`. It vanishes at one point unless `t_b − t_a ⊥ e`. So radii, centers along the normals and additive weights can only move the single point where the wall crosses `L`; they cannot make the wall contain `L` (except in the sphere's degeneracy). Exact containment would need moving each tangent site within its plane, to a "virtual tangent point" `q_a ∈ P_a`: 3 unknowns per owner (2 for `q_a`, 1 weight) against 2 conditions per neighbor pair (slope and offset along `L`), about 6 pairs per owner. That is overdetermined two to one, solvable only in special cases (on a sphere `q = t`; on a cylinder all `q` at one height, which gives the envelope's strips).
+
+**3. What the radius does.** Since containment is impossible, the next best is to make the steps flat. A step between `a`'s ball and `b`'s tangent cell lies where `π_ball,a = π_t,b`:
+
+```
+f_a(x) = (|x − t_a|² − |x − t_b|²) / (2λ_a).
+```
+
+It lies at height `D/(2λ_a)` above `P_a`, where `D = |x − t_a|² − |x − t_b|²` is of order spacing × distance. So steps flatten onto `P_a` like `1/λ` (checked: the identity holds to `2·10⁻⁹` at every step vertex). As `λ → ∞` with every ball outside, the `+` region is owned by `argmax f_a`, and the contour tends to the boundary of the convex envelope `∩ {f_a ≤ 0}`; with every ball inside, to the concave one.
+
+**4. Balls must be empty.** A ball that contains another tangent point `t_c` gives `π_a(t_c) < 0 = π_c(t_c)`: `a`'s cell takes `t_c`'s place, and `c`'s face loses its tangent point. So `λ_a` is bounded by the radius of the largest ball tangent at `t_a` on side `σ` that contains no other tangent point,
+
+```
+r_a^± = min over b with ±f_a(t_b) > 0 of |t_b − t_a|² / (2 |f_a(t_b)|),
+```
+
+the discrete version of the medial ball on that side (the *poles* of the power crust of Amenta, Choi and Kolluri (2001) are the largest empty balls through a sample; here the ball is tangent at `t_a`, so it can be computed from the tangent points alone). On the side away from which the surface curves (the convex side), `r` is the distance to the medial axis on that side, which locally is unbounded (a flat or convex region) and is limited only by other parts of the shape. On the side toward which it curves, `r ≤ 1/κ`.
+
+**5. The construction.** Put each ball on the side with the larger empty ball, with radius `λ_a = min(cap, ρ r_a)` (`ρ = 0.5`, `cap = 100` by default; `ρ < 1` keeps other tangent points strictly outside). The sample's sign is not used: only `t_a` and `n_a`. Then:
+
+- *convex and concave regions*: neighboring balls are all on the convex side and large, so the steps are flat: the contour is close to the local envelope;
+- *developable regions* (cylinders, cones): the flat direction does not limit `r`, so they behave like convex regions, and the envelope has long strip faces along the rulings;
+- *flat regions*: `r` is unbounded on both sides;
+- *saddles*: the surface curves toward both sides, `r^± ≤ 1/κ_{1,2}`, and the steps stay `O(κh²)`, as with small spheres. Nothing is gained there.
+
+This also says where the starting point (equal balls on the sample's side) goes wrong. Neighbors on opposite sides meet on a ball–ball wall `λ f_a + λ f_b = D/2`, which for large `λ` is the average plane between `P_a` and `P_b`: a power-crust face, not a tangent plane. And one radius for everything is either too small for the convex parts or too large for the concave ones: on the torus, `λ = 1` swallows every tangent point (no contour at all).
+
+**6. Extracting the surface.** Every contour face is now either an own face (exactly in its plane) or a step that lies close to one of its two owners' planes. *Merge steps into faces* gives each step to the owner whose plane it is nearer (the larger distance of its corners, minimized), cleans up the regions exactly as Contract contour regions does, and outputs each region's boundary with *all* its vertices at their contour positions. Every vertex is a vertex of the power diagram, so none is invented and none can fly off; the surface is watertight by construction. The price is that a face is planar only up to the heights of the steps merged into it. Two options trade this off:
+
+- *Snap*: move each vertex to `argmin Σ f_a(x)² + μ |x − v|²` over its regions' planes, `μ = 0.1` (vertices move by about the step height);
+- *Gap faces*: give every face its own copies of its corners, projected onto its plane, so it is exactly planar; then close the gaps between neighbors with a quad per shared edge and a polygon per vertex shared by three or more faces. Watertight, but the gaps are as wide as the steps.
+
+### Measurements
+
+Step heights on the convex outer half of the torus (1500 near-surface samples, median spacing to the nearest neighbor 0.037; steps whose centroid is more than 0.9 from the axis). "Voronoi" is `λ → 0`, every ball outside:
+
+| balls | median | 90% | max |
+|---|---|---|---|
+| Voronoi | `4.4·10⁻³` | `1.6·10⁻²` | `5.0·10⁻²` |
+| one radius, `λ = 0.01` | `1.4·10⁻³` | `5.1·10⁻³` | `1.5·10⁻²` |
+| one radius, `λ = 0.3` | `9.1·10⁻⁴` | `3.3·10⁻³` | `1.1·10⁻²` |
+| one radius, `λ = 1` | no contour: the balls on the inner half swallow every tangent point | | |
+| empty side, `ρ = 0.5`, cap 1 | `5.0·10⁻⁴` | `1.9·10⁻³` | `7.2·10⁻³` |
+| empty side, `ρ = 0.5`, cap 10 | `8.2·10⁻⁵` | `3.1·10⁻⁴` | `1.0·10⁻³` |
+| empty side, `ρ = 0.5`, cap 100 | `8.9·10⁻⁶` | `3.3·10⁻⁵` | `1.1·10⁻⁴` |
+
+On the convex half the empty-side balls reach the cap and the steps shrink exactly like `1/cap`, as (3) predicts. On the saddle half (inner) the steps stay at a median of `1.5·10⁻³` and a maximum of 0.030, the same as with sample spheres at `s = 0.1` (maximum 0.037). On the torus every ball goes outside (the outer empty ball is larger even on the saddle half); on the two spheres 361 of 1500 go inside, all within 0.23 of the crease plane `x = 0`; on the fandisk 138.
+
+Balls of one radius on the sample's side (torus, 1500 near-surface): at `λ = 0.1` the contour is 91% own faces, at `λ = 0.3` only 9%: almost all of it is then ball–ball walls between outside and inside balls. With the empty side, 68% of the contour's area is own faces and the rest are flat steps. Two balls per owner (inner and outer, both `ρ` × their empty radius, no tangent site; the power crust's pole pair, tangent at `t_a`) gave much the same: maximum contour error 0.011 against 0.016 on the torus, 0.086 against 0.103 on the fandisk.
+
+Least-squares weights: shifting both sites of each owner by `μ_a`, chosen so that each wall crosses `L_ab` at the point nearest the centroid of the current steps between `a` and `b` (three iterations), made things worse on the torus (1500 near-surface): the system is inconsistent (residual up to 0.14 with `|μ| ≤ 0.12`), 340 own faces disappeared, and the largest step grew from 0.030 to 0.036. As (2) shows, weights can only slide the crossing point; they cannot turn the wall.
+
+Comparison with the other methods, which use sample spheres at `s = 0.1`, exact `tau`, trust 2. Merge uses tangent balls (`ρ = 0.5`, cap 100). "Off" is vertices with `|sdf| > 0.02` out of all vertices (Merge keeps every region-boundary vertex, so it has 2–6 times as many); "off-plane" is the largest distance of a face's vertex from its tangent plane; "far" is vertices farther than twice the spacing (distance to the 6th nearest tangent point) from the tangent points of all their faces, with the largest ratio in parentheses:
+
+| | Contract contour regions | Triangulate step patches | Merge steps into faces |
+|---|---|---|---|
+| torus, 300 uniform | max 0.240, 173/600 off, area 9.44 | max 0.288, 137/690, area 9.00 | **max 0.091**, 207/1787, area 9.12, off-plane 0.18 |
+| torus, 1500 uniform | max 0.076, 64/3000, area 9.04 | max 0.055, 14/3620, area 9.03 | **max 0.041**, 33/8869, area 8.94, off-plane 0.11 |
+| torus, 1500 near surface | max 0.033, 24/3000 | max 0.035, 2/3458 | **max 0.016, 0**/8981, area 8.93, off-plane 0.030 |
+| two spheres, 1500 uniform | max 0.067, 27/2996 | max 0.163, 37/3010 | **max 0.039**, 50/3090, off-plane 0.081 |
+| two spheres, 1500 near surface | max 0.056, 8/2996 | max 0.127, 18/3038 | **max 0.013, 0**/3220, off-plane 0.025 |
+| box, 1500 uniform | **exact**, 0 hole edges | exact, 8 hole edges | max `3·10⁻⁴`, 17 hole edges (length ≤ `10⁻⁵`), far 55 (4.1×) |
+| box, 1500 near surface | max 0.042, 3/2996 | max 0.198, 11/2996 | **max `2·10⁻⁴`**, 0/3974, off-plane `1.5·10⁻⁴` |
+| cylinder, 1500 near surface | max 0.066, 7/2995, 3 hole edges | max 0.030, 2/3000 | **max 0.001, 0**/9949, 3 hole edges, far 213 (4.3×) |
+| cylinder, 300 near surface | max 0.105, 19/596 | max 0.078, 12/596 | **max 0.005, 0**/1903, far 53 (4.1×) |
+| fandisk, 300 near surface | max 0.508, 80/597, 7 hole edges | max 0.510, 99/886 | **max 0.158**, 244/1607, off-plane 0.23 |
+| fandisk, 1500 uniform | max 0.299, 131/2314 | max 0.307, 214/3346 | **max 0.135**, 344/6451, 28 hole edges |
+| fandisk, 1500 near surface | max 0.101, 48/2998 | max 0.154, 82/4104 | **max 0.096**, 210/7376, off-plane 0.13 |
+| fandisk, 4000 near surface | max 0.085, 15/7996, 31 hole edges | max 0.128, 35/10195, 71 hole edges | **max 0.052**, 106/18892, 3 hole edges |
+
+True areas: torus 8.88, two spheres 6.91, box 6.64, cylinder 5.97 (Merge: 5.97–5.98). Merge's areas are within 3% of the true areas, like the others' (closer on the torus at 1500 samples and on the cylinder, farther on the two spheres and the 300-sample torus with uniform samples). Its far counts are 0–7 on the torus, the two spheres and the near-surface fandisk (39 on the uniform fandisk), 55 on the uniform box and 171–213 on the cylinder, where faces become strips along the rulings (below); the other methods' are 0–16. On the box with uniform samples Merge is not exact (`3·10⁻⁴`), where the plane intersections of Approaches 1 and 3 are.
+
+Snap and gap faces (same runs):
+
+| | Merge | + Snap | + gap faces |
+|---|---|---|---|
+| torus, 1500 near surface | max 0.016, off-plane 0.030 | max 0.014, off-plane 0.017 | max 0.020, exactly planar, gaps up to 0.033 (area 9.14) |
+| torus, 1500 uniform | max 0.041, off-plane 0.11 | max 0.075, off-plane 0.031 | max 0.073, gaps up to 0.14 |
+| fandisk, 1500 near surface | max 0.096, 210 off, off-plane 0.13 | max 0.087, 41 off, off-plane 0.059 | max 0.101, gaps up to 0.13 |
+| cylinder, 1500 near surface | max 0.001, off-plane 0.045 | max 0.003, off-plane 0.004 | max 0.016, gaps up to 0.045 |
+
+Snap halves the off-plane distance at the cost of a slightly larger worst error on some shapes. Gap faces make the tangent-plane faces exactly planar, but the gaps have the size of the steps, and they add area (the torus's 8.93 becomes 9.14) and vertices (about 2.3 times). The median gap is tiny (`3·10⁻⁵` on the near-surface torus); the large ones are on saddles and at features.
+
+Runtime, 1500 samples: the empty radii take 20–30 ms (`O(n²)`), the power diagram 2.2–5.1 s (against 2.2–3.4 s with sample spheres: big balls make the clipping order less effective), merging 50–190 ms.
+
+**Developable surfaces.** On the cylinder the faces are strips along the rulings, up to 4.3 spacings long, as the envelope predicts, and every vertex is within 0.001 of the surface (against 0.030 for Triangulate step patches, which needs to intersect nearly dependent planes). There are no far vertices in the sense of Approaches 1–3: the strips' vertices are cell vertices on the surface. The strips are ragged rather than straight, since each strip is assembled from steps of different heights, and they end after a few spacings rather than spanning the cylinder.
+
+| cylinder: Triangulate step patches | cylinder: Merge steps into faces |
+|---|---|
+| ![The capped cylinder recovered by Triangulate step patches: isotropic faces.](figures/cylinder-patches.png) | ![The capped cylinder recovered by Merge steps into faces with tangent balls: long strip faces along the rulings.](figures/cylinder-merge.png) |
+
+*Capped cylinder, 1500 near-surface samples. Left: Triangulate step patches; faces are isotropic, like the Voronoi cells of the tangent points. Right: Merge steps into faces with tangent balls; faces on the side are strips along the rulings, as in the envelope of the tangent planes.*
+
+**The fandisk** improves less: 0.096 against 0.101 and 0.154 at 1500 near-surface samples, 0.052 against 0.085 and 0.128 at 4000. The reason is the ball radii: a quarter of the owners have `λ < 0.18` and a tenth `λ < 0.09`, about the spacing (0.10), because the model has many features close together (a convex edge next to a concave one bounds the balls on both sides of the face between them). 88% of the vertices off by more than 0.02 have an owner whose ball is smaller than its spacing, against 20% of the others, and 32% have owners on opposite sides (against 9%). With `λ < h`, the steps `D/(2λ)` are as large as with small spheres. More samples help (4000 samples) because the radii are set by the shape while the spacing shrinks.
+
+| fandisk: Triangulate step patches | fandisk: Merge steps into faces |
+|---|---|
+| ![The fandisk recovered by Triangulate step patches: chamfers (orange) and spikes near the features.](figures/fandisk-patches.png) | ![The fandisk recovered by Merge steps into faces with tangent balls: no spikes, rough near the concave features.](figures/fandisk-merge.png) |
+
+*Fandisk, 1500 near-surface samples. Left: Triangulate step patches, with 553 chamfers (orange) and spikes where nearly dependent planes meet. Right: Merge steps into faces; no spikes, but the regions near the concave features, where the balls are small, are rough.*
+
+| torus | two spheres | box (near surface) |
+|---|---|---|
+| ![Torus recovered by Merge steps into faces.](figures/torus-merge.png) | ![Two spheres recovered by Merge steps into faces.](figures/twospheres-merge.png) | ![Box recovered by Merge steps into faces: flat sides, sharp edges.](figures/box-merge.png) |
+
+*Merge steps into faces with tangent balls, 1500 samples (uniform for the torus and the two spheres, as in the other screenshots; near-surface for the box). The faces near the torus's inner equator (a saddle) are visibly non-planar.*
+
+![The torus contour with tangent balls, sliced at z = 0, colored by face type.](figures/torus-balls-contour.png)
+
+*The contour with tangent balls, torus, 300 samples, sliced at `z = 0` (compare the sample spheres in* Structure*): own faces (green) and steps (purple, here between a ball and another owner's tangent point). On the outer half the steps lie nearly in the planes of the own faces next to them; on the inner (saddle) half they are visible.*
+
+![2D: the contour with sample spheres at s = 0.1, with balls of radius 0.3 on the sample's side, and with balls on the empty side.](figures/fig-balls.svg)
+
+*2D, the same 70 samples as above. In 2D the steps on smooth parts are already tiny (median `3·10⁻⁵`), so the balls change little there (median `3·10⁻⁶` on the empty side). The steps that remain are at the concave creases, where the tangent points are 0.15 or more from the crease and the inner balls are small, so `D/(2λ)` is large: the largest step is 0.144 with sample spheres and with empty-side balls, and 0.099 with balls on the sample's side.*
+
+### Hole edges
+
+The contour of the tangent-ball diagram has a few hole edges on the box (17 at 1500 uniform samples), the cylinder (18) and the fandisk (28), all at points where several tangent points coincide (box and cylinder edges and corners, mesh vertices of the fandisk: 394 of 1500 tangent points on the box coincide with another one). They are slivers of length `≤ 10⁻⁵` (one of 0.017 on the box with cap 10): faces of near-zero area that one cell keeps and its neighbor drops (`computePowerDiagram` drops faces of area `< 10⁻¹²`). With near-surface samples there are none on the box and 3 on the cylinder.
+
+### Open problems in this approach
+
+- **Saddles.** By (2), no generators of this kind put `P_a ∩ P_b` in the walls, and on saddles the empty balls are small on both sides, so the steps stay `O(κh²)` (torus inner half: up to 0.030 at 1500 near-surface samples). Moving the tangent sites within their planes ("virtual tangent points") is the only freedom left; the conditions are overdetermined two to one, but a least-squares solution might still help on saddles.
+- **Features closer than the spacing** (the fandisk): the ball radii fall below the spacing and the steps are large. Two balls per owner did not change this. The empty radius uses only the tangent points; the samples' empty spheres `B(p, |d|)` are not used yet.
+- **Planarity.** Faces are planar only up to the step heights (0.03 on the near-surface torus, 0.13 on the fandisk). Gap faces make them planar but expose the gaps.
+- **Vertex count.** Merge keeps every vertex of the region boundaries, 2–6 times as many as the other methods. Most have only two regions; dropping nearly collinear ones would simplify the faces.
+- **Strips.** On the cylinder the strips end after about 4 spacings and are ragged; a straighter, longer strip would need the step heights to vanish, i.e. a larger cap or a better labeling of steps.
+
+Reference: N. Amenta, S. Choi and R. K. Kolluri, The power crust, *Proc. ACM Symposium on Solid Modeling and Applications*, 2001.
 
 ## Topology of the regions
 
