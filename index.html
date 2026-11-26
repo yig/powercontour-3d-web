@@ -92,6 +92,7 @@
     <select id="recMethod">
       <option value="off">Off</option>
       <option value="regions">Contract contour regions</option>
+      <option value="patches">Triangulate step patches</option>
       <option value="extend">Extend own faces</option>
       <option value="clip">Clip tangent planes</option>
     </select></div>
@@ -292,6 +293,8 @@ function compute() {
   const contractible = $('sampled').checked && $('tangent').checked && !$('mirrored').checked;
   if (method === 'extend' && contractible) {
     data.recovered = Recover.extendOwnFaces(sites, signs, owner, cells, planes, extendOpts());
+  } else if (method === 'patches' && contractible) {
+    data.recovered = Recover.triangulatePatches(sites, signs, owner, cells, planes, extendOpts());
   } else if (method === 'regions' && contractible) {
     // Intersects the tangent planes of the regions that the sample-to-own-tangent faces grow into.
     data.recovered = Recover.recoverSurface(sites, signs, owner, cells, planes, REC_LAMBDA, extendOpts().tau, extendOpts().trust);
@@ -571,7 +574,7 @@ function applyVisuals() {
   const planes = clipPlanes();
   scene.traverse(o => { if (o.material && o !== bboxHelper) o.material.clippingPlanes = planes; });
   $('clipOpts').style.display = $('recMethod').value === 'clip' ? '' : 'none';
-  $('extendOpts').style.display = ['extend', 'regions'].includes($('recMethod').value) ? '' : 'none';
+  $('extendOpts').style.display = ['extend', 'regions', 'patches'].includes($('recMethod').value) ? '' : 'none';
   $('eMergeRow').style.display = $('recMethod').value === 'extend' ? '' : 'none';
   for (const id of ['npts', 'sScale', 'eTau', 'eTrust', 'sphOp', 'pcOp', 'surfOp', 'sliceZ', 'cParallel', 'cSimilar', 'cTurn', 'cMargin', 'cOnPlane']) $(id + '-v').textContent = (+$(id).value).toString().slice(0, 5);
 }
@@ -586,11 +589,19 @@ function updateStats() {
     ($('recMethod').value === 'off' ? '' : !data.recovered ? 'needs sampled + tangent points only\n'
       : data.recovered.nTriples !== undefined ? `extended faces: ${data.recovered.polys.length} faces, ${data.recovered.verts.length} vertices ` +
         `(${data.recovered.nMerged} merged junctions), ${data.recovered.nDegenerate} degenerate, ${data.recovered.nHoleEdges} hole edges\n`
+      : data.recovered.patchStats ? patchLine(data.recovered)
       : data.recovered.clip ? `clipped planes: ${data.recovered.polys.length} faces, ${data.recovered.nEmpty} clipped away ` +
         `(${data.recovered.nEmptyFeature} at corners / creases)\n`
       : `recovered: ${data.recovered.polys.length} faces, ${data.recovered.verts.length} vertices, ` +
         `${data.recovered.nHoleEdges} hole edges\n` + recTopo(data.recovered.topo)) +
     `power diagram: ${data.ms.toFixed(0)} ms`;
+}
+
+function patchLine(r) {
+  const t = r.patchStats;
+  return `patches: ${r.polys.length} faces, ${r.verts.length} vertices, ${r.nHoleEdges} hole edges\n` +
+    `${t.patches} step patches (${t.partitioned} partitioned), ${t.junctions} junctions; loops ${t.convex} convex, ${t.concave} concave, ` +
+    `${t.saddle} saddle, ${t.flat} flat` + (t.nonManifoldEdges ? `; ${t.nonManifoldEdges} non-manifold edges` : '') + (t.facelessOwners ? `; ${t.facelessOwners} tangent points without a face` : '') + '\n';
 }
 
 function recTopo(t) {
@@ -616,7 +627,7 @@ const HELP = {
   pcOp: 'Opacity of the power contour: the faces between a + cell and a − cell. 0 hides it.',
   pcEdges: 'Outline the contour faces.',
   pcColorBy: 'Uniform gold, or color each face by the kinds of sites it separates, with a legend and counts. Green faces (a sample and its own tangent point) lie exactly in the tangent plane; the others are steps between them.',
-  recMethod: 'Build a surface whose faces lie in the tangent planes. Contract contour regions: give each other contour face to one of its two own faces, and intersect the tangent planes where regions meet. Extend own faces: extend each own face from its own boundary, without assigning the other faces. Both need sampled + tangent points only. Clip tangent planes: clip each tangent plane by its neighbors’ planes (any sites). See RECOVERY.md.',
+  recMethod: 'Build a surface whose faces lie in the tangent planes. Contract contour regions: give each other contour face to one of its two own faces, and intersect the tangent planes where regions meet. Triangulate step patches: remove each patch of other faces by triangulating the loop of own faces around it, choosing the triangulation from the tangent planes (their envelope where the loop is convex or concave; a decider on saddles). Extend own faces: extend each own face from its own boundary, without assigning the other faces. Both need sampled + tangent points only. Clip tangent planes: clip each tangent plane by its neighbors’ planes (any sites). See RECOVERY.md.',
   eTau: 'Planes count as dependent (e.g. coplanar faces of the box) when eigenvalues of Σ n nᵀ fall below 10^value × the largest; the vertex then keeps its contour position in those directions. With the trust radius on, this only needs to catch exact degeneracies: −12 is numerical precision. Without it (trust at 10 = off), about −2 is needed to stop nearly dependent planes from sending vertices far away.',
   eTrust: 'A tangent plane is only accurate within about one sample spacing of its tangent point. A vertex may move at most this many spacings (the distance from its contour position to the farthest of its tangent points) away from its contour position: it is the exact intersection of its planes if that is near, else the nearest point on the line where the two best-determined planes meet, else on one plane. 2 keeps box corners exact and removes far-away vertices on curved shapes. 10 = off.',
   eMerge: 'Extend own faces: where four owners meet at nearly one point and their faces disagree about which diagonal is an edge, merge the junction into one vertex where all four planes meet. Off: such junctions leave cracks.',

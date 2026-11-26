@@ -1,6 +1,6 @@
 # Recovering a surface from the power contour
 
-This note describes the structure of the power contour of samples plus tangent points, and two ways to turn it into a surface with one face per tangent point: *Contract contour regions* and *Extend own faces*. Code: `recover.js` (`recoverSurface`, `extendOwnFaces`, `qefTruncated`). A third method, *Clip tangent planes*, is described in `ARCHITECTURE.md`.
+This note describes the structure of the power contour of samples plus tangent points, and three ways to turn it into a surface with one face per tangent point: *Contract contour regions*, *Extend own faces* and *Triangulate step patches*. Code: `recover.js` (`recoverSurface`, `extendOwnFaces`, `triangulatePatches`, `qefTruncated`). A third method, *Clip tangent planes*, is described in `ARCHITECTURE.md`.
 
 ## Setup
 
@@ -99,6 +99,79 @@ This is the most literal form of "one face per tangent point, eliminate the rest
 
 Cracks are therefore an artifact of reading neighbors locally, not of the topology. In 3D the chain rule needs one more decision: a connected patch of steps can touch many own faces, and deleting it must say which of them become adjacent and where they meet. Contract contour regions makes that decision by giving each step to one of its owners.
 
+## Approach 3: Triangulate step patches (`triangulatePatches`)
+
+Own faces are kept, and the steps between them are removed patch by patch. The triangulation that joins the own faces around each patch is chosen from the tangent planes rather than from distances between tangent points.
+
+### Step patches
+
+Own faces never share an edge (generically), but they often touch at a corner. So the steps fall into many small connected patches (edge-adjacent step faces), each bounded by a loop that visits own faces `a_1 … a_k`. Measured with 1500 uniform samples, `s = 0.1`:
+
+| | step patches | loops by `k` | patches with holes |
+|---|---|---|---|
+| torus | 1395 | `k = 3`: 48%, `k = 4`: 25%, `k ≥ 5`: 27% (up to 18) | 2 |
+| two spheres | 5, all along the crease (`k` = 7 to 24) | elsewhere own faces meet directly (the sphere's degeneracy) | 0 |
+| box | 9, large and flat (`k` up to 906) | the own faces of a flat side are islands in one patch | 2 |
+
+Removing a patch means joining the planes `P_{a_1} … P_{a_k}`. Intersecting consecutive pairs gives the lines `P_{a_i} ∩ P_{a_{i+1}}`, and consecutive lines meet at `P_{a_{i−1}} ∩ P_{a_i} ∩ P_{a_{i+1}}`. For `k = 3` that is one point, a clean vertex. For `k > 3` it is a small skew polygon in no tangent plane. Instead, triangulate the loop: a triangulation of the `k`-gon of own faces has `k − 2` triangles, each a vertex `P_a ∩ P_b ∩ P_c`, and its diagonals are the pairs of faces that become adjacent across the patch. The hole closes with no extra face, and every face stays in a tangent plane. The choice of triangulation is the real decision (Contract contour regions makes it implicitly, by nearest tangent point).
+
+### Choosing the triangulation: envelopes
+
+Locally the surface is a height function `z = ½ xᵀQx` over its tangent plane, with `Q` the second fundamental form. For tangent points `a, b, c` on such a quadric (checked numerically to rounding error):
+
+- the three tangent planes meet above the *Q-circumcenter* of `a, b, c` (the point equidistant from them in the quadratic form `Q`), at height error exactly `−½ R_Q²`, where `R_Q` is that Q-circumradius;
+- with unnormalized normals `(−Qa, 1)`, `det(n_a, n_b, n_c) = 2 K · area(abc)`, where `K = det Q` is the Gaussian curvature.
+
+Where `Q` is definite (a convex or concave patch), the triangulation that minimizes the error is the Delaunay triangulation in the metric `Q`. That is the dual of an envelope of the planes: the surface is the boundary of the intersection of the half-spaces `f_a ≤ 0` (convex) or of their union (concave). An envelope of affine functions is itself a power diagram, so its dual is a regular triangulation of the planes (Aurenhammer 1987): the "change of generators" is that the triangulation comes from the planes, not the samples. Envelopes also handle features exactly: a box corner is the intersection of its three half-spaces, and a concave crease is a union.
+
+Whether a loop edge is convex or concave can be read from the data alone, with no curvature estimate: for consecutive faces `a, b`, the edge is convex if `f_a(t_b) + f_b(t_a) < 0` (each tangent point lies below the other's plane) and concave if `> 0`. On the torus (1500 samples, `s = 0.1`), 1073 of the 1082 loops on the outer half (`K > 0`) are all convex, while 210 of the 312 on the inner half (`K < 0`) mix convex and concave edges.
+
+### Saddles
+
+On a saddle (`K < 0`) the surface crosses its tangent planes, so it is neither envelope. In terms of normals, the Gauss map reverses orientation: a triangle of tangent points maps to a triangle of normals with the opposite orientation, so no envelope of the planes can follow the surface.
+
+Locally, a polyhedral saddle is a max of mins of its planes: every piecewise-linear function has such a lattice (max–min) representation (Ovchinnikov 2002). Around the loop, runs of convex edges alternate with runs of concave edges. Grouping the faces into runs joined by convex edges, the surface is the union of the groups' intersections ("max–min"). Grouping them into runs joined by concave edges, it is the intersection of the groups' unions ("min–max"). For `k = 4` with alternating edges, the two readings are `max(min(a,b), min(c,d))` and `min(max(b,c), max(d,a))`, and they are exactly the two diagonals of the loop. This is the same ambiguity as the saddle face of marching cubes, which the asymptotic decider of Nielson and Hamann (1991) resolves from the data. Here the data are the planes, and the decider compares the two readings (below).
+
+Saddles are not where vertices fly off. Since `det = 2K · area`, a saddle triangle is as well-conditioned as a convex one with the same `|K|`, and its error `½|R_Q²|` stays of order curvature × spacing² (it is even 0 when a side lies along an asymptotic direction). The real trouble is near `K = 0`, such as the torus's top and bottom circles: there `det → 0` for every triangle and the Q-circumcenter runs off along the flat direction, so no triangulation helps. That is the far-vertex problem diagnosed above, and the trust region still handles it.
+
+### The algorithm
+
+1. Weld the contour as in Contract contour regions. Own faces are the faces between a sample and its own tangent point; all others are steps.
+2. Find the step patches. Walk each patch's boundary and list the own faces around it, in order: the face across each boundary edge, and, at each boundary vertex, every own face passed when rotating around that vertex outside the patch (faces that touch the patch only at a corner).
+3. Contour vertices where three or more own faces meet with no step between them (common on the spheres) are loops too: their faces in rotation order.
+4. A patch with one loop of at most 24 faces is triangulated by the `O(k³)` minimum-cost polygon triangulation dynamic program (Klincsek 1980). Each triangle's vertex is the intersection of its three planes, placed by `qefTruncated` with the trust region, anchored at the loop corners of its three faces. The cost of a triangle is how far its vertex violates the reading: the planes of its own groups must be on the expected side (`f ≤ 0` for max–min, `f ≥ 0` for min–max), and it must not be strictly inside (outside) any other group. For an all-convex or all-concave loop both readings reduce to the envelope, and an envelope triangulation costs 0. A diagonal between two faces that are already adjacent on another loop costs a large constant, since it would make them adjacent twice.
+5. The decider. For a saddle loop, run the dynamic program under both readings and keep the cheaper, unless one reading has at most 2 groups and the other at least 4: long runs of one convexity, such as the two sides of the two-sphere crease, are strong evidence for the coarser reading. (Comparing costs alone chose the wrong reading on two crease patches, which left vertices 0.42 off.)
+6. A patch with holes, or a loop longer than 24 (the flat sides of the box, whose own faces are islands in one patch), is partitioned instead, as in Contract contour regions: each step goes to the nearest tangent point among the faces around the patch. Its vertices are then the contour vertices where three or more labels meet, handled as in step 3.
+7. Output faces are the duals: each own face's polygon is the cycle of triangles around it. Every loop is counterclockwise seen from outside and the dynamic program keeps loop order, so each triangle `(a, b, c)` says "around `a`, after `b` comes `c`", and following that order gives consistently oriented faces. Where the same three faces meet at two places, the walk continues with the nearer triangle.
+
+### Results
+
+1500 samples unless noted, `s = 0.1`, exact `tau`, trust 2; "off" counts vertices with `|sdf| > 0.02`:
+
+| | Contract contour regions | Triangulate step patches |
+|---|---|---|
+| torus, uniform | max 0.076, 64 off, 0 hole edges | **max 0.055, 14 off**, 0 hole edges |
+| torus, uniform, `s = 1` | max 0.076, 65 off, 0 | max 0.096, **23 off**, 8 hole edges |
+| torus, 300 uniform | max 0.240, 173 off, 0 | **max 0.208, 120 off**, 0 |
+| torus, near surface | max 0.033, 24 off, 0 | max 0.035, **2 off**, 0 |
+| two spheres, uniform | max 0.067, 27 off, 0 | max 0.163, 34 off, 0 |
+| two spheres, near surface | max 0.056, 8 off, 0 | max 0.127, 9 off, 0 |
+| box, uniform | exact, 0 hole edges | exact, 20 hole edges |
+
+On smooth surfaces, choosing the triangulation from the planes puts far more vertices on the surface (14 instead of 64 off on the torus). The crease is visually cleaner, with fewer fins, but its worst vertices are farther off.
+
+| torus | two spheres |
+|---|---|
+| ![Torus recovered by triangulating step patches.](figures/torus-patches.png) | ![Two spheres recovered by triangulating step patches: the crease has fewer fins.](figures/twospheres-patches.png) |
+
+### Open problems in this approach
+
+- **Hole edges** (up to 8 on curved shapes, about 20 on the box): where the same three faces meet at two places, the dual has two triangles with the same owners, and the fan walk around a face can still follow the wrong copy. On the box the partitioned flat patches have no topology cleanup yet (Contract contour regions' handling would apply).
+- **Large folded faces near `K = 0`** (the torus's inner top circle in the screenshot): each vertex is near the surface, but faces there are long and non-planar, because the trust region stops vertices short of their full intersections. Clipping the envelope to the patch's footprint, instead of the trust region, is not implemented yet.
+- **The decider** combines a cost comparison with a structural rule (2 groups against 4). It fixes the crease patches but is heuristic.
+
+References: F. Aurenhammer, Power diagrams: properties, algorithms and applications, *SIAM J. Computing* 16(1), 1987. H. Fuchs, Z. M. Kedem and S. P. Uselton, Optimal surface reconstruction from planar contours, *Communications of the ACM* 20(10), 1977. G. T. Klincsek, Minimal triangulations of polygonal domains, *Annals of Discrete Mathematics* 9, 1980. G. M. Nielson and B. Hamann, The asymptotic decider: resolving the ambiguity in marching cubes, *Proc. IEEE Visualization '91*, 1991. S. Ovchinnikov, Max-min representation of piecewise linear functions, *Beiträge zur Algebra und Geometrie* 43(1), 2002.
+
 ## Topology of the regions
 
 The contour is a closed 2-manifold, so the regions of Contract contour regions tile it, and contracting each region is well defined. Leaving a hole is never necessary. Each connected piece of a region is handled by its boundary cycles, taken in the region's tangent plane: the largest is the outer boundary, cycles of the same orientation are lobes pinched to it at a vertex, and cycles of the opposite orientation are holes.
@@ -124,14 +197,9 @@ The viewer triangulates faces by ear clipping in their plane, which handles non-
 
 All 20 runs (torus, two spheres and box; uniform and near-surface; 300 and 1500 samples; `s = 1` and `0.1`) now have 0 hole edges, with the same maximum error as before. Most of the old non-disc regions were not topological at all: welding merged two consecutive corners of a tiny contour face, and the resulting `u → u` boundary edge broke the boundary walk. With that fixed, the remaining cases are at the box's corners and edges. No annulus occurred in any run, so that path is untested on real data.
 
-### Ideas: contracting a patch of steps directly
+### Contracting a patch of steps directly
 
-Think of the steps as patches. The boundary of a connected patch is an edge loop, and each edge separates a step from an own face `a_i` outside the patch. Removing the patch means joining the planes `P_{a_1}, …, P_{a_k}` around the loop.
-
-- *The loop polygon.* Intersect consecutive outside planes pairwise: the lines `P_{a_i} ∩ P_{a_{i+1}}`, consecutive lines meeting at `P_{a_{i−1}} ∩ P_{a_i} ∩ P_{a_{i+1}}`. For `k = 3` this is one point, a clean vertex. For `k > 3` it is a small skew polygon in no tangent plane, likely badly shaped.
-- *Triangulate the loop in the dual instead.* A triangulation of the `k`-gon of own faces has `k − 2` triangles, each a vertex `P_a ∩ P_b ∩ P_c`, and its diagonals are the pairs of own faces that become adjacent across the patch. The hole then closes with no extra face and every face stays in a tangent plane. The choice of triangulation is the real decision. Contract contour regions makes it implicitly, by nearest tangent point (Delaunay-like on the tangent points).
-- *Choose it from the planes.* Locally, write the planes as heights over the patch. Where the surface is convex, it should be the upper envelope of the planes (the boundary of the intersection of the half-spaces `f_a ≤ 0`); where concave, the lower envelope. The envelope of affine functions is itself a 2D power diagram (equivalently, by polar duality, a convex hull of the planes' dual points), so its dual is a regular triangulation of the planes. This is the "change of generators": the triangulation of each patch comes from a regular triangulation in plane space, not from the samples. It would also address the mismatch between the contour's adjacency and the plane arrangement behind the far torus vertices, because envelope vertices lie on the envelope over the patch. Saddles are neither envelope; there a minimum-weight triangulation of the `k`-gon by dynamic programming (`O(k³)`), with a cost such as the distance of each triple point from the patch, is a fallback.
-- *An annulus of steps.* If the patch is a ring with own faces inside its hole, it has two boundary loops, `a_1 … a_k` outside and `b_1 … b_m` inside. Joining them is the classic problem of tiling between two contours (Fuchs, Kedem and Uselton 1977): every triangle uses two consecutive faces of one loop and one of the other, and an optimal tiling is found by dynamic programming in `O(km)` with the same costs. If the annulus is an own region rather than steps, it stays a face with a hole, as above.
+See *Approach 3* above: it removes each patch of steps by triangulating the loop of own faces around it. A ring-shaped patch of steps with own faces inside its hole has two loops, `a_1 … a_k` outside and `b_1 … b_m` inside; joining them is the classic problem of tiling between two contours (Fuchs, Kedem and Uselton 1977), where every triangle uses two consecutive faces of one loop and one of the other. Approach 3 currently partitions such patches instead.
 
 ## Vertex placement (`qefTruncated`)
 

@@ -56,6 +56,7 @@ See also `RECOVERY.md`, which explains the structure and the contraction methods
 ### Methods
 
 - **Contract contour regions** (`recoverSurface`, default): each step face is absorbed by one of its two own faces (the one with the nearer tangent point), so the regions tile the contour and neighboring faces share vertices by construction; vertices where ≥ 3 regions meet are plane intersections. Most robust topology.
+- **Triangulate step patches** (`triangulatePatches`): own faces are kept; each connected patch of steps is removed by triangulating the loop of own faces around it (dynamic program, `O(k³)`), with each triangle a vertex `P_a ∩ P_b ∩ P_c`. The cost reads the loop's convex/concave edges as a max–min or min–max of the planes (an envelope when all edges agree; a decider between the two readings on saddles). Patches with holes or long loops are partitioned by nearest tangent point instead. Faces are the duals: the cycle of triangles around each own face. Stats in `patchStats`. See RECOVERY.md, Approach 3.
 - **Extend own faces** (`extendOwnFaces`): no assignment of steps at all. Each own face's boundary gives its neighbors in order (each edge borders a step toward one neighbor `b`; a switch from `b` to `c` becomes the vertex `P_a ∩ P_b ∩ P_c`). Faces can disagree near four-owner junctions (flips); those are merged into one vertex ("Merge flipped junctions"). Leaves more cracks than the partition.
 
 Results, `s = 0.1`, `tau = 10⁻²` (rays from outside to an interior point that cross no face; areas vs true 8.88 / 6.91):
