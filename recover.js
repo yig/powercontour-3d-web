@@ -942,26 +942,29 @@
 
     // 4b. Collapse and flip (option rank). On developable surfaces (planes, cylinders, cones) the
     //     normals around a face span one or two directions, so many dual triangles have dependent
-    //     planes and no triple point near the surface.
+    //     planes and no triple point near the surface. See RECOVERY.md, Approach 5.
     //     - Collapse: a dual edge whose two planes coincide merges the two faces (same plane, one
     //       face), when the link condition holds (the endpoints' common neighbors are exactly the two
     //       opposite owners), so the triangulation stays a manifold. The merged face keeps all its
-    //       tangent points for the trust radius.
-    //     - Flip toward the envelope (Lawson), with the test written without the triple points, so it
-    //       also holds when they are at infinity. With plane vectors h = (n, -n.t), the triple point of
-    //       (a, b, c) is X with h.X = det[h_a; h_b; h_c; h], so f_d(x_abc) = D4(a,b,c,d) / D3(a,b,c).
-    //       In a convex (concave) region the Gauss map keeps orientation, so D3 has the sign of the
-    //       triangulation, and edge ac of triangles (a, b, c), (a, c, d) is on the envelope iff
-    //       -D4 (+D4) has that sign too. A flip negates D4, so exactly one diagonal passes. The
-    //       quad's four edges must all be convex or all concave, and both new triangles must keep
-    //       the orientation in the Gauss image (a convex quad there; a strip triangle with D3 = 0
-    //       may be flipped away but never created).
-
-    const detOf = os => { const [n1, n2, n3] = os.map(a => planes.get(a).normal);
-      return n1[0] * (n2[1] * n3[2] - n2[2] * n3[1]) - n1[1] * (n2[0] * n3[2] - n2[2] * n3[0]) + n1[2] * (n2[0] * n3[1] - n2[1] * n3[0]); };
+    //       tangent points: its trust radius is measured to the nearest one.
+    //     - Envelope flips (Lawson) in quads whose four edges are all convex or all concave. With
+    //       plane vectors h = (n, -n.t), f_d(x_abc) = D4(a,b,c,d) / D3(a,b,c), D4 = det[h_a;h_b;h_c;h_d],
+    //       D3 = det[n_a;n_b;n_c]. Where the Gauss map keeps orientation (convex or concave), D3 has
+    //       the sign sigma of the triangulation, so edge ac of (a, b, c), (a, c, d) is on the envelope
+    //       iff kappa sigma D4 >= 0 (kappa = -1 convex, +1 concave). The test needs no triple point,
+    //       so it also holds when one is at infinity (D3 = 0). A flip negates D4, so exactly one
+    //       diagonal passes; both new triangles must keep the orientation (sigma D3 > 0). Four planes
+    //       with coplanar normals (inside a cylinder) give D4 = 0: a tie, left alone.
+    //     - Mixed quads (convex and concave edges): flip when it lowers the quad's cost: how far its
+    //       two vertices are beyond the trust radius, plus how much its five edges are inverted (an
+    //       edge's direction on the line P_p ∩ P_q is set by whether p-q is convex or concave). Each
+    //       flip lowers the total cost, so the flips end.
+    //     Options: rank = true (all three), 'collapse', 'lawson' (the first one or two steps).
     if (o.rank) {
-      const DEP = 1e-3;
-      stats.dependentBefore = tris.filter(t => Math.abs(detOf(t.owners)) < DEP).length;
+      const detOf = os => { const [n1, n2, n3] = os.map(a => planes.get(a).normal);
+        return n1[0] * (n2[1] * n3[2] - n2[2] * n3[1]) - n1[1] * (n2[0] * n3[2] - n2[2] * n3[0]) + n1[2] * (n2[0] * n3[1] - n2[1] * n3[0]); };
+      const dependent = () => { let ex = 0, near = 0; for (const t of tris) { const D = Math.abs(detOf(t.owners)); if (D < 1e-9) ex++; else if (D < 1e-3) near++; } return [ex, near]; };
+      stats.dependentBefore = dependent();
       const members = new Map(); // representative owner -> owners merged into it
       rhoOf = (m, os) => {
         if (!(o.trust < Infinity)) return Infinity;
@@ -972,19 +975,18 @@
       const same = (a, b) => { const A = planes.get(a), B = planes.get(b);
         return Math.hypot(A.normal[0] - B.normal[0], A.normal[1] - B.normal[1], A.normal[2] - B.normal[2]) < 1e-7 && Math.abs(f(a, B.point)) < 1e-7 && Math.abs(f(b, A.point)) < 1e-7; };
       // Collapse.
-      const live = tris.map(() => true), nbr = new Map(), triOf = new Map();
+      const live = tris.map(() => true), nbr = new Map(), triOf = new Map(), repOf = new Map();
+      const rep = a => { while (repOf.has(a)) a = repOf.get(a); return a; };
       const link = (ti, d) => { const t = tris[ti]; for (let r = 0; r < 3; r++) { const a = t.owners[r];
         if (!triOf.has(a)) { triOf.set(a, new Set()); nbr.set(a, new Map()); }
-        d > 0 ? triOf.get(a).add(ti) : triOf.get(a).delete(ti);
-        for (const b of [t.owners[(r + 1) % 3], t.owners[(r + 2) % 3]]) { const N = nbr.get(a), c = (N.get(b) || 0) + d; c ? N.set(b, c) : N.delete(b); } } };
+        if (d > 0) triOf.get(a).add(ti); else triOf.get(a).delete(ti);
+        for (const b of [t.owners[(r + 1) % 3], t.owners[(r + 2) % 3]]) { const N = nbr.get(a), c = (N.get(b) || 0) + d; if (c) N.set(b, c); else N.delete(b); } } };
       tris.forEach((_, ti) => link(ti, 1));
       stats.collapsed = 0;
       const todo = [];
       for (const [a, N] of nbr) for (const b of N.keys()) if (a < b && same(a, b)) todo.push([a, b]);
       for (let q = 0; q < todo.length; q++) {
-        let [a, b] = todo[q];
-        while (!triOf.has(a) || !triOf.get(a).size) { const r = [...members].find(([, l]) => l.includes(a)); if (!r) break; a = r[0]; }
-        while (!triOf.has(b) || !triOf.get(b).size) { const r = [...members].find(([, l]) => l.includes(b)); if (!r) break; b = r[0]; }
+        const a = rep(todo[q][0]), b = rep(todo[q][1]);
         if (a === b || !nbr.get(a)?.has(b)) continue;
         const onEdge = [...triOf.get(a)].filter(ti => tris[ti].owners.includes(b));
         if (onEdge.length !== 2) continue;
@@ -993,36 +995,35 @@
         if (opp.size !== 2 || common.length !== 2 || !common.every(x => opp.has(x))) continue; // link condition
         for (const ti of onEdge) { link(ti, -1); live[ti] = false; }
         for (const ti of [...triOf.get(b)]) { link(ti, -1); tris[ti] = { ...tris[ti], owners: tris[ti].owners.map(x => x === b ? a : x) }; link(ti, 1); }
-        members.set(a, [...(members.get(a) || [a]), ...(members.get(b) || [b])]); members.delete(b);
+        members.set(a, [...(members.get(a) || [a]), ...(members.get(b) || [b])]); members.delete(b); repOf.set(b, a);
         stats.collapsed++;
         for (const c of nbr.get(a).keys()) if (same(a, c)) todo.push([a, c]);
       }
       const kept = tris.filter((_, ti) => live[ti]); tris.length = 0; tris.push(...kept);
       for (const t of tris) if (t.owners.some(a => members.has(a))) t.x = tripleVertex(t.owners, t.anchor);
       edgeCount.clear(); tris.forEach(t => countEdges(t, 1));
-      stats.dependentCollapsed = tris.filter(t => Math.abs(detOf(t.owners)) < DEP).length;
-      // Flip toward the envelope.
+
       if (o.rank !== 'collapse') {
         let sum = 0; for (const t of tris) sum += detOf(t.owners);
         const sigma = sum < 0 ? -1 : 1; // orientation of the triangulation in the Gauss image
         const det4 = (os, m) => { // det of the rows (n, -n.(t - m))
           const M = os.map(a => { const { normal: n, point: t } = planes.get(a); return [n[0], n[1], n[2], -(n[0] * (t[0] - m[0]) + n[1] * (t[1] - m[1]) + n[2] * (t[2] - m[2]))]; });
-          const d3 = (r0, r1, r2, c0, c1, c2) => M[r0][c0] * (M[r1][c1] * M[r2][c2] - M[r1][c2] * M[r2][c1]) - M[r0][c1] * (M[r1][c0] * M[r2][c2] - M[r1][c2] * M[r2][c0]) + M[r0][c2] * (M[r1][c0] * M[r2][c1] - M[r1][c1] * M[r2][c0]);
-          return -M[3][0] * d3(0, 1, 2, 1, 2, 3) + M[3][1] * d3(0, 1, 2, 0, 2, 3) - M[3][2] * d3(0, 1, 2, 0, 1, 3) + M[3][3] * d3(0, 1, 2, 0, 1, 2);
+          const d3 = (c0, c1, c2) => M[0][c0] * (M[1][c1] * M[2][c2] - M[1][c2] * M[2][c1]) - M[0][c1] * (M[1][c0] * M[2][c2] - M[1][c2] * M[2][c0]) + M[0][c2] * (M[1][c0] * M[2][c1] - M[1][c1] * M[2][c0]);
+          return -M[3][0] * d3(1, 2, 3) + M[3][1] * d3(0, 2, 3) - M[3][2] * d3(0, 1, 3) + M[3][3] * d3(0, 1, 2);
         };
-        const onEdge = new Map(), add = ti => { const o3 = tris[ti].owners; for (let r = 0; r < 3; r++) { const key = pairKey(o3[r], o3[(r + 1) % 3]); if (!onEdge.has(key)) onEdge.set(key, new Set()); onEdge.get(key).add(ti); } };
-        const del = ti => { const o3 = tris[ti].owners; for (let r = 0; r < 3; r++) onEdge.get(pairKey(o3[r], o3[(r + 1) % 3]))?.delete(ti); };
-        tris.forEach((_, ti) => add(ti));
         const quadKind = (a, b, c, d) => { // -1: all four edges convex, +1: all concave, 0: mixed
           const ty = [etypeOf(a, b), etypeOf(b, c), etypeOf(c, d), etypeOf(d, a)];
           return ty.every(e => e <= 0) && ty.includes(-1) ? -1 : ty.every(e => e >= 0) && ty.includes(1) ? 1 : 0; };
+        const onEdge = new Map(), add = ti => { const o3 = tris[ti].owners; for (let r = 0; r < 3; r++) { const key = pairKey(o3[r], o3[(r + 1) % 3]); if (!onEdge.has(key)) onEdge.set(key, new Set()); onEdge.get(key).add(ti); } };
+        const del = ti => { const o3 = tris[ti].owners; for (let r = 0; r < 3; r++) onEdge.get(pairKey(o3[r], o3[(r + 1) % 3]))?.delete(ti); };
+        tris.forEach((_, ti) => add(ti));
         const hasDir = (os, p, q) => { const i = os.indexOf(p); return i >= 0 && os[(i + 1) % 3] === q; };
         const planeSys = os => { const A = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], r = [0, 0, 0];
           for (const a of os) { const { normal: n, point: t } = planes.get(a), c = n[0] * t[0] + n[1] * t[1] + n[2] * t[2];
             for (let i = 0; i < 3; i++) { r[i] += n[i] * c; for (let j = 0; j < 3; j++) A[i][j] += n[i] * n[j]; } }
           return [A, r]; };
         // How far a triangle's exact vertex is beyond its trust radius (capped at the radius; the
-        // radius when the three planes have no common point).
+        // radius itself when the three planes have no common point).
         const farCache = new Map();
         const farCost = os => {
           const key = [...os].sort((p, q) => p - q).join(',');
@@ -1033,11 +1034,11 @@
           farCache.set(key, c);
           return c;
         };
-        // How much the edge p-q is inverted. Tpq contains the directed edge p -> q, Tqp contains q -> p;
-        // their vertices lie on the line P_p ∩ P_q at x0 + λ u, u = n_p × n_q, λ = -f_r(x0) / (n_r·u).
-        // In face p the edge runs from Tqp's vertex to Tpq's; with the face to its left, it is
-        // positive along u for a convex edge and along -u for a concave one (sigma: orientation).
-        // Parallel planes have no edge: cost R, as for a far vertex.
+        // How much edge p-q is inverted. Tpq contains the directed edge p -> q, Tqp contains q -> p;
+        // their vertices lie on the line P_p ∩ P_q at x0 + λ u, u = n_p × n_q, λ = -f_r(x0) / (n_r·u)
+        // for the third owner r. In face p the edge runs from Tqp's vertex to Tpq's, along u for a
+        // convex edge and along -u for a concave one (times sigma). Parallel planes have no edge:
+        // the cap R, as for an inverted edge.
         const edgeCost = (p, q, Tpq, Tqp) => {
           const et = etypeOf(p, q); if (!et) return 0;
           const np = planes.get(p).normal, nq = planes.get(q).normal, tp = planes.get(p).point, tq = planes.get(q).point;
@@ -1049,14 +1050,9 @@
           const len = -sigma * et * (lam(Tpq) - lam(Tqp)) * ul;
           return Number.isFinite(len) ? Math.min(R, Math.max(0, -len)) : R;
         };
-        const totalInversion = () => { let s = 0, k = 0;
-          for (const [key, ts] of onEdge) { if (ts.size !== 2) continue; const [p, q] = key.split(',').map(Number), [T1, T2] = [...ts].map(ti => tris[ti].owners);
-            const c = hasDir(T1, p, q) ? edgeCost(p, q, T1, T2) : edgeCost(p, q, T2, T1); s += c; if (c > 0) k++; }
-          return [k, +s.toFixed(3)]; };
-        stats.invertedBefore = totalInversion();
-        // The quad's cost: far vertices of its two triangles plus the inversion of its five edges
-        // (the four outer edges are measured against the triangles across them).
-        const quadJ = (a, b, c, d, t1, t2, T) => {
+        // The quad's cost: far vertices of its two triangles T plus the inversion of its five edges
+        // (each outer edge measured against the triangle across it).
+        const quadCost = (a, b, c, d, t1, t2, T) => {
           const all = [...T];
           for (const [p, q] of [[a, b], [b, c], [c, d], [d, a]]) for (const ti of onEdge.get(pairKey(p, q)) || []) if (ti !== t1 && ti !== t2) { all.push(tris[ti].owners); break; }
           let s = farCost(T[0]) + farCost(T[1]);
@@ -1067,43 +1063,12 @@
           }
           return s;
         };
-        const queue = [...onEdge.keys()];
-        stats.rankFlips = 0;
-        for (let guard = 0; queue.length && guard < 50 * tris.length; guard++) {
-          const key = queue.pop(), ts = onEdge.get(key);
-          if (!ts || ts.size !== 2) continue;
-          const [t1, t2] = [...ts], [e0, e1] = key.split(',').map(Number), o1 = tris[t1].owners;
-          const r = [0, 1, 2].find(i => { const p = o1[i], q = o1[(i + 2) % 3]; return (p === e0 && q === e1) || (p === e1 && q === e0); });
-          if (r === undefined) continue;
-          const a = o1[r], b = o1[(r + 1) % 3], c = o1[(r + 2) % 3], o2 = tris[t2].owners, s2 = o2.indexOf(a);
-          if (s2 < 0 || o2[(s2 + 1) % 3] !== c) continue;
-          const d = o2[(s2 + 2) % 3];
-          if (b === d || edgeCount.has(pairKey(b, d))) continue;
-          if (o.rank === 'det') { // experiment: the naive criterion, raise the smaller |det|
-            if (!convexQuad(a, b, c, d)) continue;
-            const before = Math.min(Math.abs(detOf([a, b, c])), Math.abs(detOf([a, c, d]))), after = Math.min(Math.abs(detOf([a, b, d])), Math.abs(detOf([b, c, d])));
-            if (!(Math.min(Math.abs(detOf([a, b, c])), Math.abs(detOf([a, c, d]))) < DEP) || !(after > before * 1.01 + 1e-12)) continue;
-          } else if (o.rank === 'edges') { // experiment: lower the inversion of the quad's edges plus far vertices
-            if (!(quadJ(a, b, c, d, t1, t2, [[a, b, d], [b, c, d]]) < quadJ(a, b, c, d, t1, t2, [[a, b, c], [a, c, d]]) - 1e-12)) continue;
-          } else {
-          const kappa = quadKind(a, b, c, d);
-          if (!kappa) continue;
-          const m = anchorOf3([a, b, c, d].slice(0, 3)), scale = Math.max(...[a, b, c, d].map(u => Math.sqrt(dist2(m, planes.get(u).point)))) || 1;
-          if (!(kappa * sigma * det4([a, b, c, d], m) < -1e-9 * scale)) continue;
-          if (!(sigma * detOf([a, b, d]) > 1e-12) || !(sigma * detOf([b, c, d]) > 1e-12)) continue;
-          }
-          del(t1); del(t2); countEdges(tris[t1], -1); countEdges(tris[t2], -1);
-          for (const [ti, os] of [[t1, [a, b, d]], [t2, [b, c, d]]]) { const m3 = anchorOf3(os); tris[ti] = { owners: os, x: tripleVertex(os, m3), anchor: m3 }; }
-          add(t1); add(t2); countEdges(tris[t1], 1); countEdges(tris[t2], 1); stats.rankFlips++;
-          for (const [p, q] of [[a, b], [b, c], [c, d], [d, a]]) queue.push(pairKey(p, q));
-        }
-        // Mixed quads (convex and concave edges): flip when it lowers the quad's cost quadJ. Each
-        // flip lowers the sum of all far and inversion costs, so the passes end.
-        stats.mixedFlips = 0;
-        if (o.rank === true || o.rank === 'mixed') {
-          const queue3 = [...onEdge.keys()];
-          for (let guard = 0; queue3.length && guard < 20 * tris.length; guard++) {
-            const key = queue3.pop(), ts = onEdge.get(key);
+        // One flip pass over a queue of edges; test(a, b, c, d, t1, t2) decides for triangles
+        // (a, b, c), (a, c, d) whether to replace them by (a, b, d), (b, c, d).
+        const flipPass = test => {
+          const queue = [...onEdge.keys()]; let flips = 0;
+          for (let guard = 0; queue.length && guard < 50 * tris.length; guard++) {
+            const key = queue.pop(), ts = onEdge.get(key);
             if (!ts || ts.size !== 2) continue;
             const [t1, t2] = [...ts], [e0, e1] = key.split(',').map(Number), o1 = tris[t1].owners;
             const r = [0, 1, 2].find(i => { const p = o1[i], q = o1[(i + 2) % 3]; return (p === e0 && q === e1) || (p === e1 && q === e0); });
@@ -1111,80 +1076,26 @@
             const a = o1[r], b = o1[(r + 1) % 3], c = o1[(r + 2) % 3], o2 = tris[t2].owners, s2 = o2.indexOf(a);
             if (s2 < 0 || o2[(s2 + 1) % 3] !== c) continue;
             const d = o2[(s2 + 2) % 3];
-            if (b === d || edgeCount.has(pairKey(b, d)) || quadKind(a, b, c, d)) continue;
-            const scale = Math.sqrt(Math.max(dist2(planes.get(a).point, planes.get(c).point), dist2(planes.get(b).point, planes.get(d).point)));
-            if (!(quadJ(a, b, c, d, t1, t2, [[a, b, d], [b, c, d]]) < quadJ(a, b, c, d, t1, t2, [[a, b, c], [a, c, d]]) - 1e-6 * scale)) continue;
+            if (b === d || edgeCount.has(pairKey(b, d)) || !test(a, b, c, d, t1, t2)) continue;
             del(t1); del(t2); countEdges(tris[t1], -1); countEdges(tris[t2], -1);
             for (const [ti, os] of [[t1, [a, b, d]], [t2, [b, c, d]]]) { const m3 = anchorOf3(os); tris[ti] = { owners: os, x: tripleVertex(os, m3), anchor: m3 }; }
-            add(t1); add(t2); countEdges(tris[t1], 1); countEdges(tris[t2], 1); stats.mixedFlips++;
-            for (const [p, q] of [[a, b], [b, c], [c, d], [d, a]]) queue3.push(pairKey(p, q));
+            add(t1); add(t2); countEdges(tris[t1], 1); countEdges(tris[t2], 1); flips++;
+            for (const [p, q] of [[a, b], [b, c], [c, d], [d, a]]) queue.push(pairKey(p, q));
           }
-        }
-        // Bad triangles: their vertex is beyond the trust radius, or their planes have no common
-        // point. Flip an edge of one when both new triangles are good and no edge of the quad gets
-        // more inverted. The number of bad triangles drops with every flip.
-        if (o.debug) { // why bad triangles were not flipped by the envelope test
-          const why = {};
-          tris.forEach((t, ti) => { if (!(farCost(t.owners) > 0)) return;
-            const rs = [];
-            for (let r = 0; r < 3; r++) {
-              const os = t.owners, a = os[(r + 1) % 3], b = os[(r + 2) % 3], c = os[r];
-              const ts = onEdge.get(pairKey(c, a)); if (!ts || ts.size !== 2) { rs.push('nonmanifold'); continue; }
-              const t2 = [...ts].find(x => x !== ti), o2 = tris[t2].owners, s2 = o2.indexOf(a);
-              if (s2 < 0 || o2[(s2 + 1) % 3] !== c) { rs.push('orient'); continue; }
-              const d = o2[(s2 + 2) % 3];
-              if (b === d || edgeCount.has(pairKey(b, d))) { rs.push('exists'); continue; }
-              const kappa = quadKind(a, b, c, d); if (!kappa) { rs.push('mixed'); continue; }
-              const m = anchorOf3([a, b, c]), scale = Math.max(...[a, b, c, d].map(u => Math.sqrt(dist2(m, planes.get(u).point)))) || 1, D = kappa * sigma * det4([a, b, c, d], m);
-              if (Math.abs(D) <= 1e-9 * scale) { rs.push('tie'); continue; }
-              if (D > 0) { rs.push('regular'); continue; }
-              rs.push('gauss');
-            }
-            const key = rs.sort().join('+'); why[key] = (why[key] || 0) + 1; });
-          stats.whyBad = why;
-        }
-        stats.badBefore = tris.filter(t => farCost(t.owners) > 0).length;
-        stats.fixFlips = 0;
-        if (o.rank === true || o.rank === 'fix') {
-          const queue2 = []; tris.forEach((t, ti) => { if (farCost(t.owners) > 0) queue2.push(ti); });
-          for (let guard = 0; queue2.length && guard < 20 * tris.length; guard++) {
-            const ti = queue2.pop(); if (!(farCost(tris[ti].owners) > 0)) continue;
-            let best = null;
-            for (let r = 0; r < 3; r++) {
-              const os = tris[ti].owners, a = os[(r + 1) % 3], b = os[(r + 2) % 3], c = os[r]; // triangle (c, a, b) = (a, b, c) rotated; edge c-a
-              const ts = onEdge.get(pairKey(c, a)); if (!ts || ts.size !== 2) continue;
-              const t2 = [...ts].find(x => x !== ti), o2 = tris[t2].owners, s2 = o2.indexOf(a);
-              if (s2 < 0 || o2[(s2 + 1) % 3] !== c) continue;
-              const d = o2[(s2 + 2) % 3]; // triangles (a, b, c) and (a, c, d), diagonal a-c
-              if (b === d || edgeCount.has(pairKey(b, d))) continue;
-              const N1 = [a, b, d], N2 = [b, c, d];
-              if (farCost(N1) > 0 || farCost(N2) > 0) continue;
-              const kappa = quadKind(a, b, c, d);
-              if (kappa) { // an all-convex or all-concave quad already on the envelope stays
-                const m = anchorOf3([a, b, c]), scale = Math.max(...[a, b, c, d].map(u => Math.sqrt(dist2(m, planes.get(u).point)))) || 1;
-                if (kappa * sigma * det4([a, b, c, d], m) > 1e-9 * scale) continue;
-              }
-              const outside = (p, q) => { for (const x of onEdge.get(pairKey(p, q)) || []) if (x !== ti && x !== t2) return tris[x].owners; return null; };
-              const inv = T => { let s = 0; const all = [...T]; for (const [p, q] of [[a, b], [b, c], [c, d], [d, a]]) { const X = outside(p, q); if (X) all.push(X); }
-                const seen = new Set();
-                for (const os3 of T) for (let k = 0; k < 3; k++) { const p = os3[k], q = os3[(k + 1) % 3], key = pairKey(p, q); if (seen.has(key)) continue; seen.add(key);
-                  const back = all.find(X => X !== os3 && hasDir(X, q, p)); if (back) s += edgeCost(p, q, os3, back); }
-                return s; };
-              const gain = inv([[a, b, c], [a, c, d]]) - inv([N1, N2]);
-              if (gain < -1e-12) continue;
-              if (!best || gain > best.gain) best = { gain, t2, N1, N2 };
-            }
-            if (!best) continue;
-            const { t2 } = best;
-            del(ti); del(t2); countEdges(tris[ti], -1); countEdges(tris[t2], -1);
-            for (const [tj, os] of [[ti, best.N1], [t2, best.N2]]) { const m3 = anchorOf3(os); tris[tj] = { owners: os, x: tripleVertex(os, m3), anchor: m3 }; }
-            add(ti); add(t2); countEdges(tris[ti], 1); countEdges(tris[t2], 1); stats.fixFlips++;
-          }
-        }
-        stats.badAfter = tris.filter(t => farCost(t.owners) > 0).length;
-        stats.invertedAfter = totalInversion();
+          return flips;
+        };
+        stats.envelopeFlips = flipPass((a, b, c, d) => {
+          const kappa = quadKind(a, b, c, d); if (!kappa) return false;
+          const m = anchorOf3([a, b, c]), scale = Math.max(...[a, b, c, d].map(u => Math.sqrt(dist2(m, planes.get(u).point)))) || 1;
+          return kappa * sigma * det4([a, b, c, d], m) < -1e-9 * scale && sigma * detOf([a, b, d]) > 1e-12 && sigma * detOf([b, c, d]) > 1e-12;
+        });
+        if (o.rank !== 'lawson') stats.mixedFlips = flipPass((a, b, c, d, t1, t2) => {
+          if (quadKind(a, b, c, d)) return false;
+          const scale = Math.sqrt(Math.max(dist2(planes.get(a).point, planes.get(c).point), dist2(planes.get(b).point, planes.get(d).point)));
+          return quadCost(a, b, c, d, t1, t2, [[a, b, d], [b, c, d]]) < quadCost(a, b, c, d, t1, t2, [[a, b, c], [a, c, d]]) - 1e-6 * scale;
+        });
       }
-      stats.dependentAfter = tris.filter(t => Math.abs(detOf(t.owners)) < DEP).length;
+      stats.dependentAfter = dependent();
     }
 
     // 5. Vertices, clipped to the footprint. A triangle's vertex is the exact intersection of its
