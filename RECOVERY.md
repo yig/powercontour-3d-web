@@ -177,6 +177,34 @@ On smooth surfaces, choosing the triangulation from the planes puts far more ver
 |---|---|---|
 | ![Torus recovered by triangulating step patches.](figures/torus-patches.png) | ![Two spheres recovered by triangulating step patches: the crease has fewer fins.](figures/twospheres-patches.png) | ![Box recovered by triangulating step patches: exact flat faces, edges and corners.](figures/box-patches.png) |
 
+### Parameters
+
+Triangulate step patches uses three controls: the sphere scale `s` (it changes the power diagram, hence the step patches; the own faces stay the same), *Dependent planes* (`tau`) and *Trust radius* (`trust`). The last two place every vertex and so also enter the cost that chooses each triangulation. *Merge flipped junctions* and the clip sliders do not apply. Measured with 1500 uniform samples (and 1500 near-surface samples on the torus), varying one parameter at a time from the defaults `s = 0.1`, `tau = 10⁻¹²`, `trust = 2`; "off" counts vertices with `|sdf| > 0.02`:
+
+| trust radius | torus | torus, near surface | two spheres | box |
+|---|---|---|---|---|
+| 1 | max 0.053, 13 off | max 0.018, 0 off | 36 off | max 0.065, 59 off |
+| 2 (default) | max 0.055, 14 off | max 0.035, 2 off | 34 off | exact |
+| 4 | max 0.055, 15 off | max 0.069, 6 off | 35 off | exact |
+| off | max 13.8, 86 off | max 10.3, 83 off | 36 off | exact |
+
+| dependent planes | torus | torus, near surface | two spheres | box |
+|---|---|---|---|---|
+| `10⁻¹²` (default) | max 0.055, 14 off | max 0.035, 2 off | 34 off | exact |
+| `10⁻²` | max 0.033, 9 off | max 0.013, 0 off | 38 off | max 0.046, 16 off |
+
+| `s` | torus | two spheres | box hole edges |
+|---|---|---|---|
+| 1 | max 0.096, 22 off | max 0.225, 33 off | 0 |
+| 0.3 | max 0.096, 17 off | max 0.163, 34 off | 0 |
+| 0.1 | max 0.055, 14 off | max 0.163, 34 off | 8 |
+| 0.03 | max 0.055, 16 off | max 0.163, 34 off | 4 |
+| 0.01 | max 0.055, 16 off | max 0.163, 34 off | 5 |
+
+- **Trust radius** is required whenever `tau` is exact: without it, the vertices near `K = 0` fly off (max 13.8 on the torus). A radius of 1 cuts the box's corners short. 2 is the best compromise.
+- **Dependent planes** is the same trade-off as in Contract contour regions. `10⁻²` drops the ill-conditioned intersections, so smooth surfaces improve (the trust radius then no longer matters), but the box loses its exact corners. Use `10⁻²` for smooth shapes and the exact default for shapes with sharp features.
+- **Sphere scale** matters least. Smaller spheres give smaller step patches, which the dynamic program handles well, down to about `s = 0.1`; below that little changes. The two-sphere crease patches look the same at every scale. The box's zero-length corner hole edges appear only for `s ≤ 0.1` (none at 1 or 0.3), and at `s = 0.01` the near-surface torus gets 3 hole edges, consistent with the numerical floor on `s` noted above.
+
 ### Open problems in this approach
 
 - **A box corner** (1500 samples): many tangent points coincide exactly at the corner, with different normals, and the triangles there are combinatorially inconsistent, leaving 8 hole edges. All their vertices are the corner point itself, so the gaps have zero length.
