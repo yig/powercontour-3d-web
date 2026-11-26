@@ -93,6 +93,10 @@ Steps are not assigned to anyone; each own face is extended from its own boundar
 
 This is the most literal form of "one face per tangent point, eliminate the rest", but because each face decides its neighbors alone, it leaves more cracks than the partition. It depends strongly on `s`: large spheres make wide steps, whose far ends are seen differently by different faces.
 
+![Extend own faces in 2D at sphere scale 1 and 0.1. On smooth parts each segment meets its neighbors at shared vertices; at the two creases some ends are seen by only one face and leave small cracks.](figures/fig-extend.svg)
+
+*Extend own faces in 2D, at `s = 1` and `s = 0.1`. Each own face is extended along its tangent line to the vertex it shares with the neighbor named by the third cell at its end. On smooth parts every end is matched and the result equals the contraction's (max error 0.022 in both). At the creases, tangent points crowd together and the steps between two faces pass through cells of a third owner, so face `a` names `b` while `b` names `c`. The ends then do not match, leaving cracks (red): 4 open ends at `s = 1`, 6 at `s = 0.1`. In 2D the steps on smooth parts are already tiny at `s = 1` (see above), so `s` matters little here; the strong dependence on `s` reported below is a 3D effect, where steps are wide polygons. The contraction has no cracks, because its regions tile the contour.*
+
 ## Vertex placement (`qefTruncated`)
 
 A vertex shared by regions or faces `a, b, c, …` minimizes `Σ (n_k·x − n_k·t_k)²`. With exact tangent data there is no noise, so the minimizer is the exact intersection of the planes when they are independent. Writing `A = Σ n nᵀ` with eigenvalues `λ` and eigenvectors `u`, and `m` for the vertex's contour position, the solution is `m` plus one correction along each `u` (these corrections are orthogonal). Two rules decide which corrections to keep:

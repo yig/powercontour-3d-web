@@ -80,7 +80,7 @@ function setup(S, s) {
       const j = P.nb; if (j < 0 || sites[j].sign > 0) return;
       const a = P.v, b = poly[(k + 1) % poly.length].v; if (dist(a, b) < 1e-12) return;
       const own = sites[i].owner === sites[j].owner;
-      edges.push({ a, b, i, j, own, owners: [sites[i].owner, sites[j].owner] });
+      edges.push({ a, b, i, j, k, own, owners: [sites[i].owner, sites[j].owner] });
     });
   });
   return { sites, cells, edges };
@@ -128,6 +128,34 @@ function contract(S, edges, trust = 2, tau = 1e-12) {
     polys.push({ loop, labels: L, verts });
   }
   return polys;
+}
+
+// ---------- Extend own faces, in 2D ----------
+// Each own face (a segment of owner a) ends at a contour vertex where a third cell meets a's two. Its
+// owner b names the neighbor, and the face is extended along its line to where it meets b's line: the
+// vertex keyed by the pair {a, b}. Shared if b's face also names a; otherwise each end is open (a crack).
+function extendOwn(S, st, trust = 2, tau = 1e-12) {
+  const ends = new Map(), faces = []; // pair key -> [{owner, m}]
+  for (const e of st.edges) {
+    if (!e.own) continue;
+    const poly = st.cells[e.i], n = poly.length, a = e.owners[0];
+    const nb = [poly[(e.k + n - 1) % n].nb, poly[(e.k + 1) % n].nb]; // the third cell at each end
+    const f = { owner: a, keys: [] };
+    [e.a, e.b].forEach((m, t) => {
+      const b = nb[t] < 0 ? -1 : st.sites[nb[t]].owner;
+      if (b < 0 || b === a) { f.keys.push(null); return; }
+      const key = a < b ? `${a},${b}` : `${b},${a}`;
+      if (!ends.has(key)) ends.set(key, []);
+      ends.get(key).push({ owner: a, m }); f.keys.push(key);
+    });
+    faces.push(f);
+  }
+  const verts = new Map();
+  for (const [key, list] of ends) {
+    const owners = key.split(',').map(Number), m = [0, 1].map(c => list.reduce((s, q) => s + q.m[c], 0) / list.length);
+    verts.set(key, { ...place(m, owners, S, tau, trust), shared: new Set(list.map(q => q.owner)).size === 2 });
+  }
+  return { faces: faces.filter(f => f.keys.every(k => k)).map(f => ({ owner: f.owner, ends: f.keys.map(k => verts.get(k)) })), verts: [...verts.values()] };
 }
 
 // ---------- SVG ----------
@@ -260,6 +288,27 @@ const full = [[-1.45, -1.05], [1.45, 1.1]];
   ];
   write('fig-contract.svg', hstack([c1.wrap(a.join('\n')), c2.wrap(b.join('\n'))]));
   const vs = polys.flatMap(P => P.verts); console.log(`  contract: ${polys.length} loops, ${vs.length} vertices, ${vs.filter(v => v.kept < 2).length} limited, max |sdf| ${Math.max(...vs.map(v => Math.abs(sdf(v.x)))).toFixed(4)}`);
+}
+
+// 4b. Extend own faces at s = 1 and s = 0.1.
+{
+  const view = [[-1.25, -0.85], [1.15, 0.95]], runs = [1, 0.1].map(sv => { const st = setup(S, sv); return { sv, st, r: extendOwn(S, st) }; });
+  const anyLimited = runs.some(({ r }) => r.verts.some(v => v.shared && v.kept < 2));
+  const parts = runs.map(({ sv, st, r }) => {
+    const c = svg(view, '', 470);
+    const open = r.verts.filter(v => !v.shared).length, err = Math.max(...r.verts.map(v => Math.abs(sdf(v.x))));
+    console.log(`  extend s=${sv}: ${r.faces.length} faces, ${r.verts.length} vertices, ${open} open ends, max |sdf| ${err.toFixed(4)}`);
+    const body = [drawCurve(c),
+      ...st.edges.map(e => `<line x1="${c.X(e.a[0])}" y1="${c.Y(e.a[1])}" x2="${c.X(e.b[0])}" y2="${c.Y(e.b[1])}" stroke="#bbb" stroke-width="1.5"/>`),
+      ...r.faces.map(f => `<line x1="${c.X(f.ends[0].x[0])}" y1="${c.Y(f.ends[0].x[1])}" x2="${c.X(f.ends[1].x[0])}" y2="${c.Y(f.ends[1].x[1])}" stroke="#1a7f4b" stroke-width="2.2" stroke-linecap="round"/>`),
+      ...r.verts.map(v => `<circle cx="${c.X(v.x[0])}" cy="${c.Y(v.x[1])}" r="${v.shared ? 2.6 : 4}" fill="${!v.shared ? COL.step : v.kept === 2 ? '#1a7f4b' : '#e67e22'}"/>`),
+      ...S.map(q => `<circle cx="${c.X(q.t[0])}" cy="${c.Y(q.t[1])}" r="1.8" fill="#222"/>`),
+      panel(c, `sphere scale s = ${sv}: ${open} open end${open === 1 ? '' : 's'}`)];
+    if (sv === 0.1) body.push(legend(c, [['line', '#bbb', 'contour'], ['line', '#1a7f4b', 'extended own faces'], ['circ', '#1a7f4b', 'shared vertex'],
+      ...(anyLimited ? [['circ', '#e67e22', 'limited by trust region']] : []), ['circ', COL.step, 'open end: seen by one face only']], 70, 120));
+    return c.wrap(body.join('\n'));
+  });
+  write('fig-extend.svg', hstack(parts));
 }
 
 // 5. Far intersections: near an inflection (zero curvature) two neighboring tangent lines meet far away.
