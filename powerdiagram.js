@@ -99,12 +99,14 @@
   }
 
   // sites: array of [x,y,z]; weights: array of w (power distance |x-p|^2 - w).
+  // lifts (optional): |p|^2 - w for each site, computed stably by the caller. Sites far away with
+  // large weights (big spheres) otherwise lose precision in |p|^2 - w.
   // Returns array of cells; each cell is an array of faces {verts, label}, label = neighbor
   // site index or -1 for the bounding box. Empty cells are [].
-  function computePowerDiagram(sites, weights, lo, hi) {
+  function computePowerDiagram(sites, weights, lo, hi, lifts) {
     const n = sites.length;
     const cells = new Array(n);
-    const sq = sites.map(p => dot(p, p));
+    const sq = lifts || sites.map(p => dot(p, p));
     const order = new Array(n);
     for (let i = 0; i < n; i++) {
       const pi = sites[i];
@@ -123,7 +125,7 @@
           if (weights[j] > weights[i] || (weights[j] === weights[i] && j < i)) { faces = []; break; }
           continue;
         }
-        const c = sq[j] - sq[i] + weights[i] - weights[j];
+        const c = lifts ? sq[j] - sq[i] : sq[j] - sq[i] + weights[i] - weights[j];
         faces = clip(faces, nrm, c, j);
         if (faces.length === 0) break;
       }
