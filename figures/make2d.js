@@ -86,6 +86,40 @@ function setup(S, s) {
   return { sites, cells, edges };
 }
 
+// ---------- Tangent balls (Approach 4) ----------
+// One ball per owner, tangent to its line at t on side σ: center t + σλn, weight λ², sign σ; plus the
+// tangent point (weight 0, sign −σ). side 'sample': σ = sign d, λ fixed. side 'empty': σ is the side with
+// the larger empty ball (empty of the other tangent points), λ = min(cap, ρ × that radius).
+function emptyRadii2(S) {
+  return S.map((q, a) => {
+    let up = Infinity, dn = Infinity;
+    S.forEach((r, b) => { if (b === a) return; const g = dot(q.n, sub(r.t, q.t)), r2 = dot(sub(r.t, q.t), sub(r.t, q.t)); if (r2 < 1e-24) return;
+      if (g > 1e-12) up = Math.min(up, r2 / (2 * g)); else if (g < -1e-12) dn = Math.min(dn, r2 / (-2 * g)); });
+    return { up, dn };
+  });
+}
+function setupBalls(S, opts) {
+  const o = { side: 'empty', lambda: 0.3, rho: 0.5, cap: 10, ...opts }, R = emptyRadii2(S), sites = [];
+  S.forEach((q, k) => {
+    const sg = o.side === 'sample' ? Math.sign(q.d) : (R[k].up >= R[k].dn ? 1 : -1);
+    const l = o.side === 'sample' ? o.lambda : Math.min(o.cap, o.rho * (sg > 0 ? R[k].up : R[k].dn));
+    sites.push({ x: [q.t[0] + sg * l * q.n[0], q.t[1] + sg * l * q.n[1]], w: l * l, sign: sg, owner: k, tan: false, ball: true, r: l });
+  });
+  S.forEach((q, k) => sites.push({ x: q.t, w: 0, sign: -sites[k].sign, owner: k, tan: true }));
+  const cells = powerDiagram(sites), edges = [];
+  cells.forEach((poly, i) => {
+    if (sites[i].sign < 0) return;
+    poly.forEach((P, k) => {
+      const j = P.nb; if (j < 0 || sites[j].sign > 0) return;
+      const a = P.v, b = poly[(k + 1) % poly.length].v; if (dist(a, b) < 1e-12) return;
+      edges.push({ a, b, i, j, k, own: sites[i].owner === sites[j].owner, owners: [sites[i].owner, sites[j].owner] });
+    });
+  });
+  return { sites, cells, edges };
+}
+// Height of a step above the nearer of its two owners' lines (0 for own faces).
+const stepHeight = (S, e) => e.own ? 0 : Math.min(...e.owners.map(o => Math.max(...[e.a, e.b].map(v => Math.abs(dot(S[o].n, sub(v, S[o].t)))))));
+
 // ---------- Contract contour regions, in 2D ----------
 function eig2(A) { // symmetric 2x2
   const [[a, b], [, c]] = A, m = (a + c) / 2, r = Math.hypot((a - c) / 2, b), l1 = m + r, l2 = m - r;
@@ -357,4 +391,22 @@ const full = [[-1.45, -1.05], [1.45, 1.1]];
   ];
   write('fig-far-intersection.svg', c.wrap(body.join('\n')));
   console.log(`  far: intersection at ${far.x.map(v => v.toFixed(2))}, ${dist(far.x, m).toFixed(2)} from m; trust radius ${lim.rho.toFixed(2)}`);
+}
+
+// 6. Approach 4, tangent balls: the sample spheres (s = 0.1), balls of one radius on the sample's side,
+//    and balls on the side of the larger empty ball with radius ρ × that ball's radius.
+{
+  const view = [[-1.25, -0.85], [1.15, 0.95]];
+  const runs = [['sample spheres, s = 0.1', setup(S, 0.1)], ['balls on the sample’s side, λ = 0.3', setupBalls(S, { side: 'sample', lambda: 0.3 })],
+    ['balls on the empty side, ρ = 0.5', setupBalls(S, { side: 'empty', rho: 0.5, cap: 10 })]];
+  const parts = runs.map(([title, st]) => {
+    const c = svg(view, '', 420), steps = st.edges.filter(e => !e.own).map(e => stepHeight(S, e)).sort((x, y) => x - y);
+    const len = es => es.reduce((a, e) => a + dist(e.a, e.b), 0), all = len(st.edges), own = len(st.edges.filter(e => e.own)) / all;
+    const bb = len(st.edges.filter(e => st.sites[e.i].ball && st.sites[e.j].ball)) / all;
+    console.log(`  balls "${title}": ${st.edges.length} contour edges, own ${(100 * own).toFixed(0)}% of the length, ball–ball ${(100 * bb).toFixed(0)}%, step height max ${steps[steps.length - 1].toFixed(4)}, median ${steps[steps.length >> 1].toExponential(1)}`);
+    const circles = st.sites.filter(s => s.ball && s.r < 0.6).map(s => `<circle cx="${c.X(s.x[0])}" cy="${c.Y(s.x[1])}" r="${(s.r * c.sc).toFixed(1)}" fill="none" stroke="${COL.samp[s.sign]}" stroke-width="0.5" stroke-opacity="0.6"/>`);
+    return c.wrap(drawDiagram(c, st, { sites: false }) + '\n' + circles.join('\n') + '\n' + S.map(q => `<circle cx="${c.X(q.t[0])}" cy="${c.Y(q.t[1])}" r="1.8" fill="#222"/>`).join('\n') + '\n' +
+      panel(c, title) + `<rect x="0" y="${c.H - 26}" width="${c.W}" height="26" fill="white" fill-opacity="0.85"/><text x="8" y="${c.H - 9}" fill="#222">own faces ${(100 * own).toFixed(0)}% of the contour; largest step ${steps[steps.length - 1].toFixed(3)}</text>`);
+  });
+  write('fig-balls.svg', hstack(parts));
 }

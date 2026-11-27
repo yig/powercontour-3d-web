@@ -59,7 +59,13 @@
   // planes: owner -> { point, normal } (the tangent point and the unit SDF gradient).
   // lambda: pull toward the contour vertex; keeps nearly parallel planes well-posed.
   // Returns { verts, anchors, vertOwners, polys: [{ owner, normal, verts, holes }], badOwners, nRegions, topo }.
-  function recoverSurface(sites, signs, owner, cells, planes, lambda, tau = 0, trust = Infinity) {
+  // opts.label: 'tangent' (default) labels a step with the owner of the nearer tangent point; 'plane'
+  // with the owner whose tangent plane is nearer (the larger distance of its corners, minimized).
+  // opts.keepCells: keep every vertex of the region boundaries at its contour position instead of
+  // intersecting planes at the junctions (used by Merge steps into faces, Approach 4).
+  function recoverSurface(sites, signs, owner, cells, planes, lambda, tau = 0, trust = Infinity, opts = {}) {
+    const byPlane = opts.label === 'plane', keepCells = !!opts.keepCells;
+    const fAbs = (P, x) => Math.abs(P.normal[0] * (x[0] - P.point[0]) + P.normal[1] * (x[1] - P.point[1]) + P.normal[2] * (x[2] - P.point[2]));
     // 1. Contour faces (oriented from the + side), welded, each labeled with the owning region.
     const welder = makeWelder(), faces = [];
     cells.forEach((cf, i) => {
@@ -70,9 +76,13 @@
         const a = owner[i], b = owner[j];
         let label = a;
         if (a !== b) {
-          const c = f.verts.reduce((s, p) => [s[0] + p[0], s[1] + p[1], s[2] + p[2]], [0, 0, 0]).map(x => x / f.verts.length);
           const pa = planes.get(a), pb = planes.get(b);
-          if (!pa || (pb && dist2(c, pb.point) < dist2(c, pa.point))) label = b;
+          if (byPlane) {
+            if (!pa || (pb && Math.max(...f.verts.map(p => fAbs(pb, p))) < Math.max(...f.verts.map(p => fAbs(pa, p))))) label = b;
+          } else {
+            const c = f.verts.reduce((s, p) => [s[0] + p[0], s[1] + p[1], s[2] + p[2]], [0, 0, 0]).map(x => x / f.verts.length);
+            if (!pa || (pb && dist2(c, pb.point) < dist2(c, pa.point))) label = b;
+          }
         }
         const alt = label === a ? b : a;
         if (!planes.get(label)) continue; // a sample on the surface has no tangent plane
@@ -218,6 +228,19 @@
     // 5. Output vertices: contour vertices where >= 3 regions meet, placed where those regions' tangent planes meet.
     const outId = new Int32Array(pts.length).fill(-1), verts = [], anchors = [], vertOwners = [];
     vLabels.forEach((ls, k) => {
+      if (keepCells && ls.size >= 2) {
+        // The contour vertex, or with opts.snap > 0 the regularized least-squares point of its regions' planes:
+        // min Σ f_a(x)² + snap |x − v|², which moves it at most about the step height when the planes nearly agree.
+        const v = pts[k], mu = opts.snap || 0;
+        let x = v;
+        if (mu > 0) {
+          const A = [[mu, 0, 0], [0, mu, 0], [0, 0, mu]], b = [mu * v[0], mu * v[1], mu * v[2]];
+          for (const o of ls) { const { normal: n, point: t } = planes.get(o), c = n[0] * t[0] + n[1] * t[1] + n[2] * t[2];
+            for (let r = 0; r < 3; r++) { for (let q = 0; q < 3; q++) A[r][q] += n[r] * n[q]; b[r] += n[r] * c; } }
+          x = solve3(A, b);
+        }
+        outId[k] = verts.length; verts.push(x); anchors.push(v); vertOwners.push([...ls]); return;
+      }
       if (ls.size < 3) return;
       if (ls.size >= 4) topo.junction4++;
       const v = pts[k];
@@ -1195,7 +1218,111 @@
     return { verts, anchors, vertOwners, polys, patchStats: stats, triangles: tris.map(t => t.owners), triVerts: vid };
   }
 
-  const api = { recoverSurface, triangulatePatches, PATCH_DEFAULTS, extendOwnFaces, mirroredSites, contourNeighbors, clipTangentPlanes, CLIP_DEFAULTS };
+  // ---------- Approach 4: tangent balls, and merging steps into faces ----------
+  //
+  // Each owner a gets one ball tangent to P_a at t_a, center t_a + σ λ_a n_a, weight λ_a², sign σ, and
+  // its tangent point (weight 0, sign −σ). Any ball tangent at t_a keeps the own face exactly in P_a. A
+  // step between a's ball and b's tangent cell lies where f_a = (|x − t_a|² − |x − t_b|²) / (2 λ_a), so
+  // large balls flatten the steps onto the planes. But a ball must not contain another tangent point,
+  // or its cell takes over that point. So σ is the side with the larger empty ball (empty of the
+  // other tangent points: the convex side of the surface, where the surface curves away from the
+  // ball), and λ_a = min(cap, ρ × that ball's radius). The sample's sign is not used. See RECOVERY.md,
+  // Approach 4.
+  const BALL_DEFAULTS = { rho: 0.5, cap: 100 };
+  function emptyBallRadii(planes) {
+    const ks = [...planes.keys()], P = ks.map(k => planes.get(k)), out = new Map();
+    P.forEach((Pa, ia) => {
+      const t = Pa.point, n = Pa.normal; let up = Infinity, dn = Infinity;
+      P.forEach((Pb, ib) => {
+        if (ib === ia) return;
+        const d = [Pb.point[0] - t[0], Pb.point[1] - t[1], Pb.point[2] - t[2]], r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+        if (r2 < 1e-24) return; // the same point (an edge or corner shared by several tangent planes)
+        const g = n[0] * d[0] + n[1] * d[1] + n[2] * d[2]; // f_a(t_b)
+        if (g > 1e-12 * Math.sqrt(r2)) up = Math.min(up, r2 / (2 * g)); else if (g < -1e-12 * Math.sqrt(r2)) dn = Math.min(dn, r2 / (-2 * g));
+      });
+      out.set(ks[ia], { up, dn });
+    });
+    return out;
+  }
+  // planes: owner -> { point, normal }. Returns the sites (balls first, then tangent points) with stable
+  // lifts |p|² − w for computePowerDiagram, and per owner { side, lambda, up, dn }.
+  function tangentBallSites(planes, opts) {
+    const o = { ...BALL_DEFAULTS, ...opts }, R = emptyBallRadii(planes);
+    const sites = [], weights = [], signs = [], owner = [], lifts = [], isTangent = [], balls = new Map();
+    const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    for (const [k, P] of planes) {
+      const { up, dn } = R.get(k), side = up >= dn ? 1 : -1, lambda = Math.min(o.cap, o.rho * (side > 0 ? up : dn)), t = P.point, n = P.normal;
+      balls.set(k, { side, lambda, up, dn });
+      sites.push([t[0] + side * lambda * n[0], t[1] + side * lambda * n[1], t[2] + side * lambda * n[2]]);
+      weights.push(lambda * lambda); signs.push(side); owner.push(k); isTangent.push(false); lifts.push(dot(t, t) + 2 * side * lambda * dot(t, n));
+    }
+    for (const [k, P] of planes) { sites.push(P.point); weights.push(0); signs.push(-balls.get(k).side); owner.push(k); isTangent.push(true); lifts.push(dot(P.point, P.point)); }
+    return { sites, weights, signs, owner, lifts, isTangent, balls };
+  }
+
+  // Merge steps into faces: every step goes to the owner whose tangent plane it is nearer, so each
+  // region is an own face plus the steps that (nearly) lie in its plane; the regions are cleaned up and
+  // turned into polygons as in Contract contour regions, but keeping every vertex of the region
+  // boundaries at its contour position (a vertex of the power diagram: nothing is invented). Faces are
+  // then planar up to the step heights. Options:
+  //   snap: move each vertex to min Σ f_a(x)² + snap |x − v|² over its regions' planes (0: off);
+  //   gaps: make every face exactly planar instead: each face gets its own copies of its corners,
+  //         projected onto its plane, and the gaps between neighbors are closed by gap faces (a quad per
+  //         shared edge, a polygon per vertex shared by three or more faces), so it stays watertight.
+  const MERGE_DEFAULTS = { snap: 0, gaps: false };
+  function mergeSteps(sites, signs, owner, cells, planes, opts) {
+    const o = { ...MERGE_DEFAULTS, ...opts };
+    const r = recoverSurface(sites, signs, owner, cells, planes, 0, 0, Infinity, { label: 'plane', keepCells: true, snap: o.snap });
+    const fAbs = (a, x) => { const P = planes.get(a), n = P.normal, t = P.point; return Math.abs(n[0] * (x[0] - t[0]) + n[1] * (x[1] - t[1]) + n[2] * (x[2] - t[2])); };
+    let offPlane = 0;
+    for (const P of r.polys) for (const L of [P.verts, ...P.holes]) for (const k of L) offPlane = Math.max(offPlane, fAbs(P.owner, r.verts[k]));
+    const steps = r.contour.faces.filter(F => !F.green).length;
+    r.mergeStats = { steps, ownFaces: r.contour.faces.length - steps, offPlane, gapWidth: 0, gapFaces: 0 };
+    if (!o.gaps) return r;
+    const g = planarWithGaps(r, planes);
+    g.mergeStats = { ...r.mergeStats, gapWidth: g.gapWidth, gapFaces: g.polys.filter(P => P.gap).length };
+    g.topo = r.topo; g.badOwners = r.badOwners;
+    return g;
+  }
+  function planarWithGaps(r, planes) {
+    const verts = [], copy = new Map(); // "poly,u" -> index of poly's own copy of vertex u
+    const proj = (a, x) => { const P = planes.get(a), n = P.normal, d = n[0] * (x[0] - P.point[0]) + n[1] * (x[1] - P.point[1]) + n[2] * (x[2] - P.point[2]); return [x[0] - d * n[0], x[1] - d * n[1], x[2] - d * n[2]]; };
+    const cp = (pi, u) => { const k = pi + ',' + u; if (!copy.has(k)) { copy.set(k, verts.length); verts.push(proj(r.polys[pi].owner, r.verts[u])); } return copy.get(k); };
+    const polys = [], edgeOf = new Map(); // directed edge "u,v" -> poly
+    r.polys.forEach((P, pi) => {
+      for (const L of [P.verts, ...P.holes]) L.forEach((u, k) => edgeOf.set(u + ',' + L[(k + 1) % L.length], pi));
+      polys.push({ owner: P.owner, normal: P.normal, verts: P.verts.map(u => cp(pi, u)), holes: P.holes.map(H => H.map(u => cp(pi, u))) });
+    });
+    const len = (a, b) => Math.hypot(verts[a][0] - verts[b][0], verts[a][1] - verts[b][1], verts[a][2] - verts[b][2]);
+    let gapWidth = 0;
+    const next = new Map(); // around a vertex u: Q's copy -> P's copy, for P's edge u -> v whose twin is in Q
+    for (const [e, pi] of edgeOf) {
+      const [u, v] = e.split(',').map(Number), qi = edgeOf.get(v + ',' + u);
+      if (qi === undefined || qi === pi) continue;
+      if (pi < qi) { // the quad Pv -> Pu -> Qu -> Qv glues P's edge u -> v to Q's edge v -> u
+        const Pu = cp(pi, u), Pv = cp(pi, v), Qu = cp(qi, u), Qv = cp(qi, v);
+        gapWidth = Math.max(gapWidth, len(Pu, Qu), len(Pv, Qv));
+        polys.push({ owner: -1, gap: true, verts: [Pv, Pu, Qu, Qv], holes: [] });
+      }
+      next.set(cp(qi, u), cp(pi, u));
+    }
+    const seen = new Set();
+    for (const [a0] of next) { // a vertex shared by k >= 3 faces: the polygon of its k copies (k = 2 cancels)
+      if (seen.has(a0)) continue;
+      const cyc = []; let a = a0;
+      while (a !== undefined && !seen.has(a)) { seen.add(a); cyc.push(a); a = next.get(a); }
+      if (a === a0 && cyc.length >= 3) polys.push({ owner: -1, gap: true, verts: cyc, holes: [] });
+    }
+    for (const P of polys) if (P.gap) {
+      const s = [0, 0, 0];
+      P.verts.forEach((k, i) => { const p = verts[k], q = verts[P.verts[(i + 1) % P.verts.length]]; s[0] += p[1] * q[2] - p[2] * q[1]; s[1] += p[2] * q[0] - p[0] * q[2]; s[2] += p[0] * q[1] - p[1] * q[0]; });
+      const l = Math.hypot(s[0], s[1], s[2]) || 1; P.normal = [s[0] / l, s[1] / l, s[2] / l];
+    }
+    return { verts, polys, gapWidth };
+  }
+
+  const api = { recoverSurface, triangulatePatches, PATCH_DEFAULTS, extendOwnFaces, mirroredSites, contourNeighbors, clipTangentPlanes, CLIP_DEFAULTS,
+    tangentBallSites, emptyBallRadii, BALL_DEFAULTS, mergeSteps, MERGE_DEFAULTS };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Recover = api;
 })(this);
