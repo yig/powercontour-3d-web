@@ -46,7 +46,8 @@ shot torus-trust 480 400 "{$REC, \"shape\": \"torus\", \"eTau\": -12, \"eTrust\"
 # Tangent balls: the contour by face type (compare torus-contour).
 shot torus-balls-contour 640 480 "{$BASE, \"shape\": \"torus\", \"npts\": 300, \"balls\": true, \"pcColorBy\": \"type\", \"pcOp\": 1, \"slice\": true, \"sliceZ\": 0}"
 # The comparison grid of RECOVERY.md: every shape (1500 uniform samples) by every method, with the
-# raw power contour (colored by face type) with sample spheres and with tangent balls as the first columns. Shot names: cmp-<shape>-<method>.
+# raw power contour (colored by face type) with sample spheres and with tangent balls as the first columns,
+# and Approach 6 with its refinements (containment in flips, soft vertices) as the last. Shot names: cmp-<shape>-<method>.
 CMP="$BASE, \"npts\": 1500, \"sampling\": \"random\", \"sScale\": 0.1, \"pcOp\": 0, \"pcEdges\": false"
 FANDISK="${FANDISK:-$PWD/../../code-release/examples/fandisk.obj}"
 HORSE="${HORSE:-$PWD/../../../paper-math-code/code/third_party/gpytoolbox/test/unit_tests_data/horse.obj}"
@@ -56,6 +57,7 @@ cmpshape() { # name "shape json fragment"
   for m in regions extend patches collapse; do shot cmp-$1-$m 480 400 "{$CMP, $2, \"recMethod\": \"$m\"}"; done
   shot cmp-$1-merge 480 400 "{$CMP, $2, \"balls\": true, \"recMethod\": \"merge\"}"
   shot cmp-$1-ballplanes 480 400 "{$CMP, $2, \"balls\": true, \"recMethod\": \"ballplanes\"}"
+  shot cmp-$1-best 480 400 "{$CMP, $2, \"balls\": true, \"recMethod\": \"ballplanes\", \"pContain\": true, \"pSoft\": true}"
 }
 cmpshape torus '"shape": "torus"'
 cmpshape twospheres '"shape": "twospheres", "cam": [0.6, -2.4, 1.6]'

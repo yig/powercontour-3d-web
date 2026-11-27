@@ -1,4 +1,4 @@
-// Experiments for the untried ideas of RECOVERY.md §5. `node figures/experiments.js [n] [random|band] [method ...]`
+// Experiments behind Approach 6 and the refinements (RECOVERY.md §5; variants idea1 = Approach 6, idea2 = containment, idea3 = metric flips, idea6 = soft vertices). `node figures/experiments.js [n] [random|band] [method ...]`
 // prints one row per shape and method, with the metrics of compare.js plus containment: the number
 // of tangent-plane faces whose polygon does not contain their tangent point.
 'use strict';

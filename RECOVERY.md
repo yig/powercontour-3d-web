@@ -1,6 +1,6 @@
 # Recovering a surface from the power contour
 
-**Goal.** From SDF samples we know, for each sample `p_a`, its tangent point `t_a` (the closest surface point) and the normal `n_a` there. The power contour of the samples and their tangent points is a closed surface, but it is lumpy and far more complex than the data warrants. Among its faces, the ones that contain a tangent point carry trustworthy information: a point and its tangent plane. We want a surface made *only* of such facets: one planar polygon per tangent plane, containing its tangent point, with neighboring polygons sharing edges. This note explains the structure of the contour that makes this possible, five ways we tried to get there, how their outputs compare, experiments with four new ideas (§5), and which ideas are worth keeping.
+**Goal.** From SDF samples we know, for each sample `p_a`, its tangent point `t_a` (the closest surface point) and the normal `n_a` there. The power contour of the samples and their tangent points is a closed surface, but it is lumpy and far more complex than the data warrants. Among its faces, the ones that contain a tangent point carry trustworthy information: a point and its tangent plane. We want a surface made *only* of such facets: one planar polygon per tangent plane, containing its tangent point, with neighboring polygons sharing edges. This note explains the structure of the contour that makes this possible, six ways we tried to get there and three refinements, how their outputs compare, what the experiments with new ideas taught (§5), and which ideas are worth keeping.
 
 | | method | one-line idea | code |
 |---|---|---|---|
@@ -11,7 +11,8 @@
 | 4 | Tangent balls + Merge steps into faces | change the generators so the other faces almost lie in the planes, then merge them in | `tangentBallSites`, `mergeSteps` |
 | 5 | Collapse and flip | repair Approach 3's connectivity with plane-only tests | `triangulatePatches` (option `rank`) |
 | — | Clip tangent planes | clip each plane by its neighbors' planes (an earlier method; see `ARCHITECTURE.md`) | `clipTangentPlanes` |
-| Idea 1 | Ball connectivity, plane vertices | Approach 4's regions as connectivity, Approach 5's plane vertices (§5) | `triangulatePatches` (options `partition`, `patchDP`) |
+| 6 | Ball connectivity, plane vertices | Approach 4's regions as connectivity, Approach 5's plane vertices | `triangulatePatches` (options `partition`, `patchDP`) |
+| + | refinements of 3, 5, 6 | keep tangent points inside faces; curvature-metric flips; soft vertices | `triangulatePatches` (options `contain`, `metric`, `soft`) |
 
 Reproducing: the numbers come from `node figures/compare.js [n] [random|band]` and `node figures/experiments.js`, the 2D figures from `node figures/make2d.js`, the 3D figures from `bash figures/shoot3d.sh` (headless Chrome; the fandisk needs `../../code-release/examples/fandisk.obj` and the horse gpytoolbox's `horse.obj`, see the scripts). The earlier, piecemeal version of this note, with every experiment log, is `RECOVERY.md` at commit `a9b3cf2`.
 
@@ -60,7 +61,7 @@ The contour is the "lumpy surface": it has up to 6 times as many faces as there 
 
 Eliminate the steps: extend each own face in its plane until it meets its neighbors' planes. The result has one face per tangent point, edges on the lines `P_a ∩ P_b`, and vertices at the points `P_a ∩ P_b ∩ P_c`.
 
-It is easiest to think about in the **dual**: one dual vertex per facet (per tangent point), one dual edge per pair of adjacent facets, one dual triangle per output vertex. A choice of *connectivity* is a triangulation of the tangent points; given it, the *geometry* is determined: every vertex is the intersection of its three planes. All five methods are different ways to choose this triangulation (explicitly or implicitly) and to cope with triangles whose three planes do not meet nearby.
+It is easiest to think about in the **dual**: one dual vertex per facet (per tangent point), one dual edge per pair of adjacent facets, one dual triangle per output vertex. A choice of *connectivity* is a triangulation of the tangent points; given it, the *geometry* is determined: every vertex is the intersection of its three planes. All the methods are different ways to choose this triangulation (explicitly or implicitly) and to cope with triangles whose three planes do not meet nearby.
 
 In the power diagram's own dual (the weighted Delaunay triangulation), eliminating steps means collapsing the edge between each sample and its tangent point. Edge collapses keep a manifold only under the link condition, which wide steps violate; this is why simply "collapsing" is not enough.
 
@@ -159,6 +160,24 @@ above `P_a`: steps flatten onto the planes like `1/λ`. But a ball may not conta
 
 **Limits.** On a cylinder every quad of four strips is a tie, so local flips grow strips only one or two rows from the caps; a ladder of strips would need a direct construction. Naive alternatives failed: flipping to maximize `|det|` gives planes that meet, but as non-neighbors (cylinder: 0.012 → 0.251), and applying the far-plus-inversion cost to tie quads destroys the cylinder.
 
+### Approach 6: Ball connectivity, plane vertices (`triangulatePatches`, options `partition: 'plane'`, `patchDP: false`, `rank`)
+
+**Idea.** Approaches 4 and 5 are each right about half of the problem. Merge steps into faces (Approach 4) gets the *connectivity* right: on the tangent-ball diagram the regions follow the planes' envelope, including long strips along a cylinder's rulings. But its *geometry* is the diagram's vertices, so its faces are not quite planar. Collapse and flip (Approach 5) gets the geometry right (vertices where three planes meet, exactly planar faces) but inherits the isotropic, Voronoi-like connectivity of the nearest-tangent-point partition. Approach 6 takes the connectivity from one and the geometry from the other.
+
+**How.** On the tangent-ball diagram, label every step with the owner whose plane is nearer, as Merge does, and clean up the regions as in Approach 1. The junctions of the resulting partition, where three or more regions meet, are the dual triangles (a junction of `k > 3` regions is triangulated by Approach 3's dynamic program). Each triangle's vertex is its three planes' intersection, within the trust radius. Collapse and flip then merges coplanar faces and repairs the triangulation.
+
+**Result.** On the cylinder the side faces are strips along the rulings, about 190 times taller than wide. Their vertices are within `4·10⁻⁴` of the surface, against 0.012 for Collapse and flip and 0.002 for Merge, with exactly planar faces and no chamfers. On the box it is exact, with a handful of faces, and it is the most accurate plane-faced method on the uniform fandisk and horse.
+
+**Limits.** It inherits 13–42 hole edges from the tangent-ball diagram (slivers that the diagram drops, as for Merge). Where the tangent balls are small, near features closer together than a few spacings, the connectivity is no better than the partition's: on the near-surface fandisk a few triples land far (0.502).
+
+### Refinements of Approaches 3, 5 and 6
+
+Three options change the connectivity or the vertices of the dual-triangulation methods. They were tried as Ideas 2, 3 and 6 (§5), which records what worked and what did not.
+
+- **Keep tangent points inside their faces** (`contain: 'flips'`). Faces `p` and `q` meet along the line `P_p ∩ P_q`, and `t_p` is on the inner side of that edge exactly when `f_q(t_p)` has the sign of the edge's type (negative for convex). So if `f_p(t_q)` and `f_q(t_p)` have opposite signs, `p` and `q` cannot share an edge with both tangent points inside their faces: the pair is *inadmissible*. This is read from the data alone. During flips, a flip may not make an inadmissible pair adjacent unless the pair it replaces is inadmissible too, and in mixed quads the violation joins the cost.
+- **Curvature-metric flips** (`metric`). On a surface `z = ½ xᵀQx` the best triangulation is the Delaunay triangulation in the metric `Q` (§1.5). Estimate `Q` at each tangent point from how the neighbors' normals turn, `n_b − n_a ≈ S (t_b − t_a)`, and flip toward the Delaunay triangulation in `|S| + ε max|λ| I`. On a cylinder `S` has eigenvalues `1/r` and 0, so triangles stretch about `1/√ε` times along the rulings. Quads touching a sharp feature (a normal turning by more than `metricFeature` radians per spacing) are left alone.
+- **Soft vertices** (`soft`). Instead of a chamfer where three planes meet too far away, place each vertex by least squares on its faces' planes, with a small pull (`μ = 0.01`) toward its trust-limited position and within the trust radius. Faces are then nearly planar instead of being cut by an extra face.
+
 ### Clip tangent planes (`clipTangentPlanes`)
 
 An earlier method that uses only `t`, `n` and signs: neighbors come from a diagram of mirrored pairs `t ± δn`, and each tangent plane is clipped by its neighbors' half-spaces (unions across concave creases). Every face is exactly planar and contains its tangent point, but faces share no vertices: the result is a polygon soup, with gaps, overlaps and, on the fandisk, large spurious faces. It shows the opposite trade-off from Approach 4: perfect facets, no shared edges.
@@ -169,18 +188,18 @@ All runs: seed 1, `s = 0.1`, exact `tau`, trust 2; Approach 4 uses tangent balls
 
 ### 3.1 Visual
 
-![Six shapes (rows) by the power contour with sample spheres and with tangent balls, the five recovery methods, and Idea 1 (columns).](figures/comparison.png)
+![Six shapes (rows) by the power contour with sample spheres and with tangent balls, the six recovery methods, and Approach 6 with its refinements (columns).](figures/comparison.png)
 
-*1500 uniform samples. Columns 1–2: the raw contour, green own faces and purple steps. Columns 3–7: the five methods; column 8: Idea 1 (§5), tangent-ball connectivity with plane vertices. Red edges are hole edges, orange faces chamfers. The individual shots are `figures/cmp-<shape>-<method>.png`.*
+*1500 uniform samples. Columns 1–2: the raw contour, green own faces and purple steps. Columns 3–8: Approaches 1–6; column 9: Approach 6 with two refinements, tangent points kept inside faces and soft vertices. Red edges are hole edges, orange faces chamfers. The individual shots are `figures/cmp-<shape>-<method>.png`.*
 
 What to look for:
 
 - **The raw contour** with sample spheres has spikes wherever steps reach far. With tangent balls it is already close to the surface on the box and cylinder; on the horse a large ball makes faces reach the domain's edge.
 - **Contract** and **Triangulate** look alike: isotropic, Voronoi-like faces everywhere, including on the flat box sides and the cylinder.
 - **Extend** shows its red cracks along the box and cylinder edges and around the fandisk.
-- **Merge** is the only one of the five with long strips on the cylinder side; its faces, although many, are not quite planar, and it fails on the horse.
+- **Merge** has long strips on the cylinder side; its faces, although many, are not quite planar, and it fails on the horse.
 - **Collapse and flip** has the fewest faces: the box and the fandisk's flat top are a few large faces. Its cylinder side remains isotropic.
-- **Idea 1** combines the two: strips on the cylinder side and large flat faces, with vertices where the planes meet.
+- **Ball connectivity, plane vertices** (Approach 6) combines the two: strips on the cylinder side and large flat faces, with vertices where the planes meet. Its refinements remove the remaining chamfers (orange).
 
 ### 3.2 Numerical
 
@@ -196,7 +215,8 @@ What to look for:
 | 4. Merge steps (tangent balls) | 0.041 / 33 | **0.039** / 50 | `3·10⁻⁴` / 0 | 0.002 / 0 | **0.135** / 344 | 1.406 / 563 |
 | 5. Collapse and flip | **0.025 / 5** | 0.116 / 38 | exact / 0 | 0.012 / 0 | 0.307 / 101 | 0.276 / 280 |
 | Clip tangent planes | 0.273 / 276 | 0.370 / 135 | 0.190 / 57 | 0.374 / 235 | 1.182 / 2191 | 0.740 / 1548 |
-| Idea 1 (§5) | 0.043 / 6 | 0.116 / 31 | exact / 0 | **`4·10⁻⁴` / 0** | 0.184 / **76** | **0.175 / 192** |
+| 6. Ball connectivity, plane vertices | 0.043 / 6 | 0.116 / 31 | exact / 0 | **`4·10⁻⁴` / 0** | 0.184 / 76 | **0.175** / 192 |
+| 6 + containment + soft vertices | 0.043 / 6 | 0.070 / 30 | exact / 0 | **`4·10⁻⁴` / 0** | 0.209 / **57** | 0.221 / **154** |
 
 Same, 1500 near-surface samples:
 
@@ -210,7 +230,8 @@ Same, 1500 near-surface samples:
 | 4. Merge steps (tangent balls) | **0.016 / 0** | **0.013 / 0** | `2·10⁻⁴` / 0 | 0.001 / 0 | **0.096** / 210 | **0.056** / 142 |
 | 5. Collapse and flip | 0.028 / 1 | 0.061 / 8 | **exact / 0** | 0.006 / 0 | 0.173 / **40** | 0.094 / 142 |
 | Clip tangent planes | 0.190 / 206 | 0.405 / 139 | 0.156 / 15 | 0.099 / 41 | 1.392 / 1731 | 1.387 / 1721 |
-| Idea 1 (§5) | 0.061 / 1 | 0.088 / 6 | exact / 0 | **`4·10⁻⁴` / 0** | 0.502 / 41 | 0.067 / **105** |
+| 6. Ball connectivity, plane vertices | 0.061 / 1 | 0.088 / 6 | exact / 0 | **`4·10⁻⁴` / 0** | 0.502 / 41 | 0.067 / 105 |
+| 6 + containment + soft vertices | 0.061 / 1 | 0.084 / 9 | exact / 0 | **`4·10⁻⁴` / 0** | 0.502 / **20** | 0.073 / **84** |
 
 **Sparse samples** (300 uniform), largest error:
 
@@ -221,7 +242,8 @@ Same, 1500 near-surface samples:
 | 3. Triangulate | 0.288 | 0.093 | exact | 0.739 | 0.738 | 0.342 |
 | 4. Merge | **0.091** | 0.094 | 0.002 | 0.009 | **0.202** | 1.323 |
 | 5. Collapse and flip | 0.173 | 0.093 | exact | 0.261 | 0.443 | 0.351 |
-| Idea 1 (§5) | 0.120 | 0.093 | exact | **0.003** | 0.278 | 0.338 |
+| 6. Ball connectivity, plane vertices | 0.120 | 0.093 | exact | **0.003** | 0.278 | 0.338 |
+| 6 + containment + soft vertices | 0.120 | 0.093 | exact | **0.003** | 0.323 | 0.318 |
 
 **Structure**, 1500 uniform samples: vertices; hole edges (directed edges with no reversed twin); off-plane (largest distance of a facet's vertex from its own tangent plane); area (true: torus 8.88, two spheres 6.91, box 6.64, cylinder 5.97, fandisk 8.82, horse 4.27). The contour rows give the face count, the share of the area in own faces, and the area.
 
@@ -234,16 +256,19 @@ Same, 1500 near-surface samples:
 | 3. Triangulate | 3620, 0, 0, 9.08 | 3010, 0, 0.018, 7.20 | 2363, 8, 0, 6.64 | 3020, 0, 0.007, 5.99 | 3346, 0, 0.131, 9.85 | 3881, 3, 0.143, 5.67 |
 | 4. Merge | 8869, 0, 0.109, 8.95 | 3090, 0, 0.081, 6.98 | 6247, 17, `3·10⁻⁴`, 6.64 | 10210, 18, 0.006, 5.97 | 6451, 28, 0.251, 8.67 | 6817, 11, 1.402, 5.76 |
 | 5. Collapse and flip | 3132, 0, 0, 9.06 | 3002, 0, 0.018, 7.19 | 1495, 8, 0, 6.64 | 2822, 0, 0.007, 5.98 | 2512, 0, 0.131, 9.59 | 3319, 3, 0.143, 5.71 |
+| 6. Ball connectivity | 3004, 0, 0, 9.05 | 3008, 0, 0.021, 7.07 | 1453, 19, 0, 6.64 | 2808, 17, `2·10⁻⁴`, 5.97 | 2266, 42, 0.101, 9.81 | 3087, 13, 0.063, 5.20 |
+| 6 + refinements | 3000, 0, `6·10⁻⁴`, 9.04 | 2996, 0, 0.028, 7.12 | 1443, 19, 0, 6.64 | 2808, 17, `2·10⁻⁴`, 5.97 | 2006, 42, 0.055, 9.98 | 2813, 13, 0.045, 5.40 |
 
-Triangulate and Collapse and flip also output chamfer faces: 310 and 66 on the torus, 478 and 215 on the fandisk, 521 and 240 on the horse.
+Triangulate, Collapse and flip, and Ball connectivity also output chamfer faces: 310, 66 and 2 on the torus, 478, 215 and 130 on the fandisk, 521, 240 and 137 on the horse. With soft vertices there are none.
 
 ### 3.3 Reading the comparison
 
 - **The raw contour with tangent balls is already a good surface** where the balls are big (errors of `10⁻³` on the box and cylinder), only too complex and not made of tangent facets. Merge inherits its accuracy, and its failure on the horse, where a large ball makes the contour reach the domain's edge.
 - **Plane intersections are exact where the connectivity is right and wrong where it is not.** The methods that intersect planes (1, 2, 3, 5) are exact (Extend: `3·10⁻⁵`) on the box, but their errors on smooth and developable parts are governed by triples that are not neighbors in the planes' arrangement, hidden by the trust region and chamfers.
-- **Collapse and flip has the fewest bad vertices among the five plane-intersection methods** on most cases and is the only one that reduces the face count toward what the planes require. Its worst vertices on the fandisk are exact intersections of independent planes within the trust radius: the trust radius is a weak test of validity.
+- **Ball connectivity, plane vertices (Approach 6) is the most accurate plane-faced method** on uniform samples of the cylinder, fandisk and horse, because its connectivity comes from the tangent-ball diagram. With containment and soft vertices it has the fewest vertices off on the fandisk and horse.
+- **Collapse and flip has the fewest bad vertices among the methods with isotropic connectivity** on most cases and is the only one that reduces the face count toward what the planes require. Its worst vertices on the fandisk are exact intersections of independent planes within the trust radius: the trust radius is a weak test of validity.
 - **Merge is the most accurate on near-surface samples** but pays in planarity (off-plane up to 0.25), vertex count (up to 3–4×), and robustness (the horse).
-- **Contract contour regions is the most robust of the five on sparse and thin shapes** (300 samples: best on two spheres and the horse).
+- **Contract contour regions is the most robust on sparse and thin shapes** (300 samples: best on two spheres and the horse).
 - **Extend own faces** is rarely better and has cracks everywhere; **Clip tangent planes** has perfect facets but no shared edges.
 - **The fandisk is hard for everyone**: features closer together than a few sample spacings bound the tangent balls (a quarter are smaller than 0.18, about two spacings), and they make the plane-intersection methods name wrong triples.
 
@@ -259,58 +284,42 @@ In the viewer, "Recommended settings on method change" (on by default) applies t
 | ball size `ρ`, cap | 4 | 0.5, 100 | Steps shrink like `1/cap` on convex parts (median step `9·10⁻⁶` at cap 100 against `4·10⁻³` for Voronoi). `ρ < 1` keeps other tangent points strictly outside the balls. |
 | chamfer, stitch | 3, 5 | on | Chamfers make facets exactly planar (off-plane `10⁻¹³` instead of 0.008 on the torus) at the cost of extra faces. |
 | snap, gap faces | 4 | off | Snap halves the off-plane distance; gap faces make facets planar but expose gaps as wide as the steps. |
-| `contain`, `metric`, `soft` | 3, 5, Idea 1 | off | Ideas 2, 3 and 6 (§5). `metricEps` 0.02 (strip aspect about `1/√ε`), `metricFeature` 1 (radians per spacing); `soft`: `mu` 0.01, containment hinges off. |
+| `contain`, `metric`, `soft` | 3, 5, 6 | off | The refinements (§2; experiments in §5). `metricEps` 0.02 (strip aspect about `1/√ε`), `metricFeature` 1 (radians per spacing); `soft`: `mu` 0.01, containment hinges off. |
 
-## 5. Trying the ideas
+## 5. Experiments with the ideas
 
-Four of the untried ideas (§6) were implemented as options of `triangulatePatches` and measured with `node figures/experiments.js [n] [random|band] [variant ...]`, which adds two measures to those of §3: faces whose polygon does not contain their tangent point (by more than `10⁻⁶`), and *inadmissible* dual edges (Idea 2). In the viewer: the method *Ball connectivity, plane vertices* (Idea 1) and three checkboxes for Ideas 2, 3 and 6. Issues: `007a018` (Idea 1, open), `82ecf73`, `db60088`, `d1ef955`.
+Approach 6 and the three refinements (§2) started as Ideas 1, 2, 3 and 6 of §6. They are measured with `node figures/experiments.js [n] [random|band] [variant ...]`, which adds two measures to those of §3: faces whose polygon does not contain their tangent point (by more than `10⁻⁶`), and inadmissible dual edges. Issues: `007a018` (Approach 6, open), `82ecf73`, `db60088`, `d1ef955`.
 
-Largest error / vertices off by more than 0.02, 1500 uniform samples, each idea applied to Collapse and flip (Idea 1 replaces its connectivity):
+Largest error / vertices off by more than 0.02, 1500 uniform samples, each refinement applied to Collapse and flip:
 
 | | torus | two spheres | box | cylinder | fandisk | horse |
 |---|---|---|---|---|---|---|
-| Collapse and flip | **0.025 / 5** | 0.116 / 38 | exact | 0.012 / 0 | 0.307 / 101 | 0.276 / 280 |
-| Idea 1: ball connectivity | 0.043 / 6 | 0.116 / 31 | exact | **`4·10⁻⁴` / 0** | **0.184** / 76 | 0.175 / 192 |
-| Idea 2: containment in flips | 0.025 / 5 | 0.105 / 37 | exact | 0.012 / 0 | 0.307 / 117 | 0.276 / 273 |
-| Idea 3: metric flips (from the partition) | 0.076 / 8 | **0.067** / 35 | exact | 0.016 / 0 | 0.508 / 224 | 0.215 / 366 |
-| Idea 3, then Collapse and flip | 0.053 / 7 | 0.116 / 43 | exact | 0.016 / 0 | 0.307 / 102 | 0.276 / 282 |
-| Idea 6: soft vertices | 0.025 / 5 | 0.116 / 39 | exact | 0.012 / 0 | 0.299 / 62 | 0.203 / 202 |
-| Ideas 1 + 6 | 0.043 / 6 | 0.116 / **30** | exact | `4·10⁻⁴` / 0 | 0.209 / 65 | **0.146** / 172 |
-| Ideas 1 + 2 + 6 | 0.043 / 6 | 0.070 / **30** | exact | `4·10⁻⁴` / 0 | 0.209 / **57** | 0.221 / **154** |
+| 5. Collapse and flip | **0.025 / 5** | 0.116 / 38 | exact | 0.012 / 0 | 0.307 / 101 | 0.276 / 280 |
+| + containment in flips | 0.025 / 5 | 0.105 / 37 | exact | 0.012 / 0 | 0.307 / 117 | 0.276 / 273 |
+| + soft vertices | 0.025 / 5 | 0.116 / 39 | exact | 0.012 / 0 | 0.299 / 62 | 0.203 / 202 |
+| metric flips, then Collapse and flip | 0.053 / 7 | 0.116 / 43 | exact | 0.016 / 0 | 0.307 / 102 | 0.276 / 282 |
+| metric flips on the partition, no Collapse and flip | 0.076 / 8 | **0.067** / 35 | exact | 0.016 / 0 | 0.508 / 224 | 0.215 / 366 |
+| 6. Ball connectivity, plane vertices | 0.043 / 6 | 0.116 / 31 | exact | **`4·10⁻⁴` / 0** | **0.184** / 76 | 0.175 / 192 |
+| 6 + soft vertices | 0.043 / 6 | 0.116 / **30** | exact | `4·10⁻⁴` / 0 | 0.209 / 65 | **0.146** / 172 |
+| 6 + containment + soft vertices | 0.043 / 6 | 0.070 / **30** | exact | `4·10⁻⁴` / 0 | 0.209 / **57** | 0.221 / **154** |
 
-300 uniform samples (largest error): Collapse and flip 0.173 / 0.093 / exact / 0.261 / 0.443 / 0.351 (torus, two spheres, box, cylinder, fandisk, horse); Idea 1 0.120 / 0.093 / exact / 0.003 / 0.278 / 0.338; Idea 6 alone 0.355 / 0.093 / exact / 0.261 / 0.895 / 0.351; Ideas 1 + 2 + 6 0.120 / 0.093 / exact / 0.003 / 0.323 / 0.318. 1500 near-surface: Idea 3 then Collapse and flip is best on the torus (0.014 / 0, against 0.028 / 1) and two spheres (0.040); Idea 1 is best on the cylinder (`4·10⁻⁴`) and horse (0.067) but worst on the fandisk (0.502, against 0.173).
+With 1500 near-surface samples, metric flips then Collapse and flip are best on the torus (0.014 / 0, against 0.028 / 1) and two spheres (0.040). With 300 uniform samples, soft vertices alone are worse in the worst case (torus 0.355, fandisk 0.895, against 0.173 and 0.443).
 
-### Idea 1: tangent-ball connectivity, plane geometry
+**Approach 6 (`007a018`).** The clearest win: the only change that improves the worst case on developable, CAD and organic shapes alike with uniform samples. It stays open for its inherited hole edges and the near-surface fandisk (0.502, against 0.173).
 
-`triangulatePatches(…, { partition: 'plane', patchDP: false, rank: true })` on the tangent-ball diagram: steps are labeled by the nearer plane, as in Merge, and the partition's junctions become the dual triangles; vertices are triple points, then Collapse and flip. This is the clearest win. On the cylinder the faces are strips along the rulings (side faces about 190 times taller than wide) and every vertex is within `4·10⁻⁴` of the surface, against 0.012 for Collapse and flip and 0.002 for Merge, with exactly planar faces and no chamfers. It is the best plane method on the uniform fandisk and horse, and on the sparse torus, cylinder and fandisk (Contract contour regions stays better on the sparse two spheres and horse). Open (`007a018`): it inherits 13–42 hole edges from the tangent-ball diagram (slivers it drops, as for Merge), and on the near-surface fandisk a few triples land far (0.502).
+**Containment.** The test is exact, not a proxy: face `p`'s edge with `q` lies on `P_p ∩ P_q`, and with `u = n_p × n_q`, `(n_p × u) · (t_p − x) = −f_q(t_p)` for any `x` on that line. Inadmissible pairs are common (115 of 4499 dual edges on the torus, 735 of 3107 on the fandisk). As a cost on every diagonal, including the dynamic program and stitching, it hurt at creases (two spheres 0.116 → 0.382); in the flips only it is safe and modestly useful: inadmissible edges drop 10–25%, and faces whose tangent point is outside drop on two spheres (21 → 11) and the horse (225 → 169). Most remaining inadmissible edges are loop edges imposed by the contour, not diagonals the method chooses.
 
-### Idea 2: containment as an edge test
+**Metric flips.** The fitted shape operator is exact on the cylinder (eigenvalues 2 and 0). Two problems had to be fixed: flips cycled at the cylinder's rim, where tangent points on the edge have normals blended between cap and side (now each quad flips at most twice), and the metric is meaningless at features, where the fit mixes two sides (hence `metricFeature`). Then strips form (cylinder side faces 4.7 times longer than wide at `ε = 0.02`, 6.5 at 0.005, against 1.8 isotropic), and smooth shapes improve from the isotropic start. But no feature cutoff suits all shapes (0.5 for the fandisk and cylinder, 2 or more for the torus and horse; at the default 1 the uniform fandisk goes 0.307 → 0.508), and its strips are worse than Approach 6's: three nearly parallel planes meet far away and the trust region places the vertex.
 
-The per-edge test is exact, not a proxy: face `p`'s edge with `q` lies on `P_p ∩ P_q`, the inner side in `P_p` is `n_p × (±u)` with `u = n_p × n_q`, and `(n_p × u) · (t_p − x) = −f_q(t_p)` for any `x` on the line. So `t_p` is on the inner side iff `−type · f_q(t_p) ≥ 0`, and a pair with `f_p(t_q)` and `f_q(t_p)` of opposite signs cannot be adjacent with both tangent points inside. Inadmissible edges are common: 115 of 4499 dual edges on the torus, 735 of 3107 on the fandisk after Collapse and flip. As a cost on every diagonal (dynamic program, stitching, flips) it hurt at creases (two spheres 0.116 → 0.382). Applied only in the flips (`contain: 'flips'`) it is safe and modestly useful: inadmissible edges drop 10–25%, faces whose tangent point is outside drop on two spheres (21 → 11) and the horse (225 → 169), errors are equal or slightly better. Most remaining inadmissible edges are loop edges imposed by the contour, not diagonals the method chooses.
+**Soft vertices.** Two details mattered. The pull must target each vertex's initial, trust-limited position, not its contour anchor: a strip's anchor is mid-strip, and pulling toward it folds the strip (Approach 6 on the cylinder: 0.169, area 8.91). And the trust radius must stay a hard limit, or nearly dependent planes pull vertices far at sparse sampling (torus, 300 samples: 1.45). An optional containment hinge, `(n_a × (x_w − x_v)) · (t_a − x_v) ≥ 0` for each edge `x_v → x_w` of face `a` (linear in `x_v` with `x_w` fixed), does not work: at weights 1–100 faces leave their planes (torus off-plane up to 0.25) and still contain their tangent points less often than Collapse and flip's (104–113 faces outside against 79). It is off by default.
 
-### Idea 3: anisotropic Delaunay
-
-The shape operator `S` is fitted at each tangent point from its neighbors (`n_b − n_a ≈ S (t_b − t_a)`, symmetric, least squares; on the cylinder its eigenvalues are 2 and 0, exactly), and Lawson flips use the in-circle test in `|S̄| + ε max|λ| I`, averaged over the quad. Two problems appeared. The flips cycled at the cylinder's rim, where tangent points on the edge have normals blended between cap and side; each quad now flips at most twice. And the metric is meaningless at features, where the fitted `S` mixes two sides: quads with a point whose normal turns faster than `metricFeature` radians per spacing are left to the planes. With both, strips form (cylinder side faces 4.7 times longer along the rulings at `ε = 0.02`, 6.5 at 0.005, against 1.8 isotropic) and smooth shapes improve from the isotropic start (two spheres 0.163 → 0.067; near-surface torus 0.035 → 0.014). But the feature cutoff has no universal value: 0.5 suits the fandisk and cylinder, 2 or more the torus and horse; at 1 (default) the uniform fandisk gets worse (0.307 → 0.508). Strips from metric flips are also worse than Idea 1's: their triple points meet three nearly parallel planes and are placed by the trust region.
-
-### Idea 6: soft vertices
-
-Block Gauss–Seidel over the vertices: each solves a 3 × 3 system for `Σ f_a(x)²` over its faces, plus `μ |x − x₀|²` (`μ = 0.01`), plus optional squared hinges for containment. The containment of `t_a` across an edge `x_v → x_w` of face `a` is `(n_a × (x_w − x_v)) · (t_a − x_v) ≥ 0`, which is linear in `x_v` when `x_w` is fixed, so each hinge is one more row. Three lessons:
-
-- The pull target matters. Toward the contour anchors (the plan), long strip faces fold (Idea 1 + 6 on the cylinder: 0.169, area 8.91), because a strip's anchor is mid-strip. Toward each vertex's initial, trust-limited placement it is a refinement.
-- It needs the trust radius as a hard limit: without it, nearly dependent planes pull vertices to their far intersection at sparse sampling (torus, 300 samples: 1.45).
-- **Containment cannot be bought with geometry.** At hinge weight 1–100 the faces leave their planes (torus off-plane up to 0.25) and still contain their tangent points less often than Collapse and flip's (torus: 104–113 outside against 79); before the trust-radius limit was added, the hinges even diverged (fandisk 24.3). Containment is decided by the connectivity. The default is therefore soft planes only.
-
-As a replacement for chamfers, soft vertices help where chamfers were many (uniform horse 0.276 / 280 → 0.203 / 202, fandisk 101 → 62 off, no chamfer faces), keep the box exact, and leave faces planar to `10⁻³`–`10⁻¹`. At 300 samples alone they are worse in the worst case (torus 0.355, fandisk 0.895): chamfers keep each face planar there, soft vertices bend them.
-
-### What this says
-
-Connectivity matters most, and the tangent-ball diagram is the best source of it found so far: with uniform samples, Idea 1 is the only change that improves the worst case on developable, CAD and organic shapes alike (near-surface fandisk excepted). Idea 2 shows that containment is a property of the connectivity, and Idea 6 confirms it from the other side. Idea 3 is right in principle on smooth parts, but a metric estimated from the data is unreliable exactly where the hard cases are (features, sparse sampling).
+**What this says.** Connectivity matters most, and the tangent-ball diagram is the best source of it found so far. Containment is a property of the connectivity: the test helps when choosing adjacencies, and moving vertices cannot achieve it. A curvature metric is right in principle on smooth parts, but estimated from the data it is unreliable exactly where the hard cases are (features, sparse sampling).
 
 ## 6. What to keep
 
 Back to the goal: facets on tangent planes, each containing its tangent point, tiling the shape and sharing edges. Each approach contributes one clean idea, about either connectivity or geometry.
 
-**Geometry is free once connectivity is right.** If each facet lies exactly in its plane and every vertex is shared by three facets, every vertex is forced to be `P_a ∩ P_b ∩ P_c`: there is nothing left to optimize. So vertex optimization has room only where the model is relaxed: soft planarity (Merge's snap, Idea 6), vertices shared by more than three facets (least squares), or merged facets. **The real problem is choosing the dual triangulation**, and a good triangulation is one whose triple points are near, whose edges are not inverted, and whose facets contain their tangent points. The experiments of §5 bear this out: soft vertex placement cannot make faces contain their tangent points, while a different source of connectivity (Idea 1) is the largest single improvement.
+**Geometry is free once connectivity is right.** If each facet lies exactly in its plane and every vertex is shared by three facets, every vertex is forced to be `P_a ∩ P_b ∩ P_c`: there is nothing left to optimize. So vertex optimization has room only where the model is relaxed: soft planarity (Merge's snap, soft vertices), vertices shared by more than three facets (least squares), or merged facets. **The real problem is choosing the dual triangulation**, and a good triangulation is one whose triple points are near, whose edges are not inverted, and whose facets contain their tangent points. The experiments of §5 bear this out: soft vertex placement cannot make faces contain their tangent points, while a different source of connectivity (Approach 6) is the largest single improvement.
 
 The best parts of each method:
 
@@ -318,13 +327,13 @@ The best parts of each method:
 - **Contract contour regions: always a valid tiling.** Painting the contour by nearest tangent point gives a partition that is closed by construction, with a complete set of topology cases. It is the right fallback and the right tie-break where planes coincide, the most robust method on sparse and thin shapes, and a safe starting triangulation, but it is isotropic.
 - **Extend own faces: a negative result worth stating.** Adjacency must be decided once, on a shared structure (a partition or a dual triangulation); per-face decisions leave cracks.
 - **Triangulate step patches: the planes decide the connectivity.** Convex and concave edges are read from data alone (`f_a(t_b) + f_b(t_a)`); envelopes are regular triangulations of the planes; saddles are lattice (max–min) polyhedra with a two-way decider. Step patches localize the decision into small polygon triangulation problems that a dynamic program solves exactly.
-- **Tangent balls: the right connectivity on developable and flat parts, from the diagram itself.** Large empty tangent balls flatten steps like `1/λ`, so the diagram's regions follow the envelope, including strips along rulings that no plane-intersection method builds. Used for connectivity only (Idea 1), they give the best plane-faced results. The impossibility result (no generator puts `P_a ∩ P_b` in the walls) explains why a combinatorial step is always needed after the diagram.
-- **Collapse and flip: plane-only predicates.** The `4 × 4` determinant `D4` decides envelope flips without computing a triple point and works at infinity; the signed length of an edge along `P_p ∩ P_q` detects folds; coplanar facets merge, so a facet can own many tangent points. These are the local validity tests that a connectivity search needs; Idea 2's containment test belongs with them.
+- **Tangent balls: the right connectivity on developable and flat parts, from the diagram itself.** Large empty tangent balls flatten steps like `1/λ`, so the diagram's regions follow the envelope, including strips along rulings that no plane-intersection method builds. Used for connectivity only (Approach 6), they give the best plane-faced results. The impossibility result (no generator puts `P_a ∩ P_b` in the walls) explains why a combinatorial step is always needed after the diagram.
+- **Collapse and flip: plane-only predicates.** The `4 × 4` determinant `D4` decides envelope flips without computing a triple point and works at infinity; the signed length of an edge along `P_p ∩ P_q` detects folds; coplanar facets merge, so a facet can own many tangent points. These are the local validity tests that a connectivity search needs; The containment test (§2) belongs with them.
 - **Vertex placement: a validity guard, not a fix.** The trust region and the `Q`-circumcenter analysis explain far vertices as wrong combinatorics.
 
-**Toward a tiling by tangent-plane facets.** Ideas 1, 2, 3 and 6 were tried in §5; the current best configuration is Ideas 1 + 2 + 6 (tangent-ball connectivity, Collapse and flip with containment in the flips, soft vertices). The others remain untried:
+**Toward a tiling by tangent-plane facets.** Six ideas for combining these pieces were listed here. Ideas 1, 2, 3 and 6 became Approach 6 and its refinements (§2, §5); the current best configuration is Approach 6 with containment in the flips and soft vertices. Two remain untried:
 
-4. **Global search over triangulations.** Local flips stall on ties (cylinder) and on mixed quads (saddles), and Idea 3 showed that flips with a varying metric cycle. A global objective over the dual triangulation (far vertices + inverted edges + inadmissible edges), searched by annealing or seeded from several starts (the nearest-tangent partition, the tangent-ball regions), would not stall at the first local minimum. Idea 2's finding that most inadmissible edges are imposed by the contour suggests also letting such a search change loop edges.
+4. **Global search over triangulations.** Local flips stall on ties (cylinder) and on mixed quads (saddles), and the metric flips showed that flips with a varying metric cycle. A global objective over the dual triangulation (far vertices + inverted edges + inadmissible edges), searched by annealing or seeded from several starts (the nearest-tangent partition, the tangent-ball regions), would not stall at the first local minimum. The containment experiment's finding that most inadmissible edges are imposed by the contour suggests also letting such a search change loop edges.
 5. **The samples' empty spheres as a constraint.** No surface point lies inside a sample's sphere `B(p, |d|)`, so a vertex inside one is at least that deep off the surface. On the near-surface fandisk this test catches 16 of 67 bad vertices with 2 false alarms in 2791, without knowing the surface. It could replace the trust radius as the validity test, which §3.3 found weak.
 
 ## References

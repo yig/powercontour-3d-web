@@ -624,9 +624,9 @@
   // partition: how steps are labeled in step 1: 'nearest' tangent point (the restricted Voronoi
   // diagram) or nearest 'plane' (as in Merge steps into faces; meant for tangent balls, whose steps
   // nearly lie in the planes). patchDP: re-triangulate step patches from the planes (steps 2-3);
-  // false keeps the partition's junctions everywhere (Idea 1: tangent-ball connectivity, plane geometry).
+  // false keeps the partition's junctions everywhere (RECOVERY.md, Approach 6: tangent-ball connectivity, plane vertices).
   const PATCH_DEFAULTS = { tau: 1e-12, trust: 2, chamfer: true, stitch: true, rank: false, partition: 'nearest', patchDP: true, contain: false, metric: false, metricEps: 0.02, metricFeature: 1, soft: false };
-  // contain (Idea 2): make two faces adjacent only if each keeps its tangent point on the inner side of
+  // contain (RECOVERY.md, §2, Refinements): make two faces adjacent only if each keeps its tangent point on the inner side of
   // their shared line; the violation is a cost for diagonals (steps 3, 4b) and a veto for envelope flips.
   const DP_MAX = 24; // longer loops, and patches with holes, keep the partition's junctions
   function triangulatePatches(sites, signs, owner, cells, planes, opts) {
@@ -1011,7 +1011,7 @@
       return { onEdge, flipPass };
     };
 
-    // 4a. Anisotropic Delaunay (option metric, Idea 3). On z = ½ xᵀQx three tangent planes meet above
+    // 4a. Anisotropic Delaunay (option metric; RECOVERY.md, §2, Refinements). On z = ½ xᵀQx three tangent planes meet above
     //     the Q-circumcenter of their tangent points, at height error −½ R_Q², so the best triangulation
     //     of a convex or concave patch is the Delaunay triangulation in the metric Q. Q (the shape
     //     operator) is estimated at each tangent point from its neighbors in the current triangulation:
@@ -1322,7 +1322,7 @@
     return { verts, anchors, vertOwners, polys, patchStats: stats, triangles: tris.map(t => t.owners), triVerts: vid, members };
   }
 
-  // ---------- Soft vertex optimization (Idea 6) ----------
+  // ---------- Soft vertex optimization (RECOVERY.md, §2, Refinements) ----------
   // With the connectivity fixed, move the vertices (in place) to minimize
   //   Σ_faces a Σ_{x ∈ F_a} f_a(x)²  +  μ Σ |x − m|²  +  w Σ_edges max(0, −g)²,
   // where m is a vertex's initial position (pull: 'initial', the triple point or its trust-limited
