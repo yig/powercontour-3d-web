@@ -102,6 +102,7 @@
       <option value="collapse">Collapse and flip</option>
       <option value="clip">Clip tangent planes</option>
     </select></div>
+  <label class="check"><input type="checkbox" id="recPreset" checked> Recommended settings on method change</label>
   <div id="extendOpts">
     <div class="row"><label>Dependent planes, log₁₀</label><input type="range" id="eTau" min="-14" max="-0.5" step="0.5" value="-12"><span class="val" id="eTau-v"></span></div>
     <div class="row"><label>Trust radius × spacing</label><input type="range" id="eTrust" min="0.5" max="10" step="0.1" value="2"><span class="val" id="eTrust-v"></span></div>
@@ -671,6 +672,7 @@ const HELP = {
   pcOp: 'Opacity of the power contour: the faces between a + cell and a − cell. 0 hides it.',
   pcEdges: 'Outline the contour faces.',
   pcColorBy: 'Uniform gold, or color each face by the kinds of sites it separates, with a legend and counts. Green faces (a sample and its own tangent point) lie exactly in the tangent plane; the others are steps between them.',
+  recPreset: 'When the method changes, set the controls it uses to their recommended values: sampled + tangent points, sphere scale 0.1, exact dependent planes (−12) and trust radius 2 for the plane-intersection methods (with Merge flipped junctions, Chamfer and Stitch on); tangent balls with ρ 0.5 and cap 10² for Merge steps into faces; the default clip options for Clip tangent planes. Uncheck to keep your own settings when switching. See RECOVERY.md, Parameters.',
   recMethod: 'Build a surface whose faces lie in the tangent planes. Contract contour regions: give each other contour face to one of its two own faces, and intersect the tangent planes where regions meet. Extend own faces: extend each own face from its own boundary, without assigning the other faces. Triangulate step patches: remove each patch of other faces by triangulating the loop of own faces around it, choosing the triangulation from the tangent planes (their envelope where the loop is convex or concave; a decider on saddles). Merge steps into faces: give each other contour face to the owner whose tangent plane it is nearer, and keep every vertex of the resulting regions at its contour position (a vertex of the power diagram, never a plane intersection). Meant for Tangent balls, where the steps nearly lie in the planes; faces are then planar up to the step heights. Collapse and flip: Triangulate step patches, then merge faces whose planes coincide, flip toward the planes’ envelope where four faces are all convex or all concave (a test with the 4 × 4 determinant of the planes, valid even when three planes meet at infinity), and in quads with convex and concave edges flip where it pulls vertices into the trust radius and un-inverts edges. These five need sampled + tangent points only. Clip tangent planes: clip each tangent plane by its neighbors’ planes (any sites). See RECOVERY.md.',
   mSnap: 'Merge steps into faces: move each vertex to the point that minimizes the squared distances to its faces’ tangent planes plus 0.1 × its squared distance to its contour position. Faces get flatter; vertices move by about the step height.',
   mGaps: 'Merge steps into faces: give every face its own copies of its corners, projected onto its tangent plane, so it is exactly planar; then close the gaps between neighbors with orange gap faces (one per shared edge, one per vertex shared by three or more faces). Watertight; the gaps are as wide as the steps.',
@@ -731,11 +733,32 @@ $('objLoad').addEventListener('click', () => $('objFile').click());
 $('objFile').addEventListener('change', e => { readOBJFile(e.target.files[0]); e.target.value = ''; });
 document.addEventListener('dragover', e => e.preventDefault());
 document.addEventListener('drop', e => { e.preventDefault(); readOBJFile(e.dataTransfer.files[0]); });
-for (const id of ['sampling', 'seed', 'sampled', 'tangent', 'mirrored', 'recMethod', 'sScale', 'balls', 'ballRho', 'ballCap', 'mSnap', 'mGaps']) $(id).addEventListener('change', compute);
+for (const id of ['sampling', 'seed', 'sampled', 'tangent', 'mirrored', 'sScale', 'balls', 'ballRho', 'ballCap', 'mSnap', 'mGaps']) $(id).addEventListener('change', compute);
 for (const id of ['ballRho', 'ballCap']) $(id).addEventListener('input', applyVisuals);
 $('sScale').addEventListener('input', applyVisuals);
 for (const id of ['eTau', 'eTrust', 'eMerge', 'pChamfer', 'pStitch']) $(id).addEventListener('change', compute);
 for (const id of ['eTau', 'eTrust']) $(id).addEventListener('input', applyVisuals);
+// Recommended settings per method (RECOVERY.md, Parameters), applied when the method changes if
+// "Recommended settings on method change" is checked. Only the inputs a method uses are set.
+const PLANE_PRESET = { sampled: true, tangent: true, mirrored: false, balls: false, sScale: 0.1,
+  eTau: Math.log10(Recover.PATCH_DEFAULTS.tau), eTrust: Recover.PATCH_DEFAULTS.trust };
+const C = Recover.CLIP_DEFAULTS;
+const METHOD_PRESETS = {
+  regions: PLANE_PRESET,
+  extend: { ...PLANE_PRESET, eMerge: true },
+  patches: { ...PLANE_PRESET, pChamfer: Recover.PATCH_DEFAULTS.chamfer, pStitch: Recover.PATCH_DEFAULTS.stitch },
+  collapse: { ...PLANE_PRESET, pChamfer: Recover.PATCH_DEFAULTS.chamfer, pStitch: Recover.PATCH_DEFAULTS.stitch },
+  merge: { sampled: true, tangent: true, mirrored: false, balls: true, ballRho: Recover.BALL_DEFAULTS.rho,
+    ballCap: Math.log10(Recover.BALL_DEFAULTS.cap), mSnap: Recover.MERGE_DEFAULTS.snap > 0, mGaps: Recover.MERGE_DEFAULTS.gaps },
+  clip: { cParallel: C.parallelDeg, cUnion: C.concaveUnion, cMutual: C.mutualConvex, cRing2All: C.ring2All, cFeatures: C.features,
+    cSimilar: C.similarDeg, cTurn: C.turnFactor, cMargin: C.marginDeg, cOnPlane: C.onPlaneFactor, cRing2: C.ring2, cSplit: C.splitFeature },
+};
+$('recMethod').addEventListener('change', () => {
+  if ($('recPreset').checked) for (const [id, v] of Object.entries(METHOD_PRESETS[$('recMethod').value] || {})) {
+    const el = $(id); if (el.type === 'checkbox') el.checked = v; else el.value = v;
+  }
+  compute(); applyVisuals();
+});
 const reclip = () => { if (data.recovered?.clip) { data.recovered = clipPlanesNow(); buildRecovered(); updateStats(); } applyVisuals(); };
 for (const id of ['cParallel', 'cSimilar', 'cTurn', 'cMargin', 'cOnPlane']) $(id).addEventListener('input', reclip);
 for (const id of ['cFeatures', 'cRing2', 'cRing2All', 'cSplit', 'cUnion', 'cMutual']) $(id).addEventListener('change', reclip);

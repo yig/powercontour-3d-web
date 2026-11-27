@@ -235,6 +235,8 @@ Triangulate and Collapse and flip also output chamfer faces: 229 and 44 on the t
 
 ## 4. Parameters
 
+In the viewer, "Recommended settings on method change" (on by default) applies these defaults when the method changes. The plane-intersection methods share one preset, including Extend own faces: smaller `s` reduces its hole edges somewhat (torus, near-surface: 11 at 0.1, 6 at 0.03), but at `s ≤ 0.03` the near-surface box and cylinder get vertices more than 1.0 off.
+
 | parameter | used by | default | effect |
 |---|---|---|---|
 | sphere scale `s` | 1, 2, 3, 5 | 0.1 | Changes only the steps. Extend wants `s → 0` (open edges on the torus: 1328 at `s = 1`, 84 at 0.1); Contract and Triangulate are best at 0.1–1; below about 0.01 the absolute tolerance and nearest-tangent ties add hole edges. |
