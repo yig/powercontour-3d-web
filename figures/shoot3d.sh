@@ -43,34 +43,22 @@ shot torus-contour 640 480 "{$BASE, \"shape\": \"torus\", \"npts\": 300, \"sScal
 shot torus-exact 480 400 "{$REC, \"shape\": \"torus\", \"eTau\": -12, \"eTrust\": 10}"
 shot torus-tau 480 400 "{$REC, \"shape\": \"torus\", \"eTau\": -2, \"eTrust\": 10}"
 shot torus-trust 480 400 "{$REC, \"shape\": \"torus\", \"eTau\": -12, \"eTrust\": 2}"
-# The default on shapes with sharp features.
-shot box-trust 480 400 "{$REC, \"shape\": \"box\"}"
-shot twospheres-trust 480 400 "{$REC, \"shape\": \"twospheres\", \"cam\": [0.6, -2.4, 1.6]}"
-# Triangulate step patches, same settings.
-shot torus-patches 480 400 "{$REC, \"shape\": \"torus\", \"recMethod\": \"patches\"}"
-shot box-patches 480 400 "{$REC, \"shape\": \"box\", \"recMethod\": \"patches\"}"
-shot twospheres-patches 480 400 "{$REC, \"shape\": \"twospheres\", \"recMethod\": \"patches\", \"cam\": [0.6, -2.4, 1.6]}"
-# Approach 4: tangent balls and Merge steps into faces. The contour by face type (compare torus-contour),
-# then the merged surfaces with the default settings above (compare the trust and patches shots).
-BALLS="$REC, \"balls\": true, \"recMethod\": \"merge\""
+# Tangent balls: the contour by face type (compare torus-contour).
 shot torus-balls-contour 640 480 "{$BASE, \"shape\": \"torus\", \"npts\": 300, \"balls\": true, \"pcColorBy\": \"type\", \"pcOp\": 1, \"slice\": true, \"sliceZ\": 0}"
-shot torus-merge 480 400 "{$BALLS, \"shape\": \"torus\"}"
-shot twospheres-merge 480 400 "{$BALLS, \"shape\": \"twospheres\", \"cam\": [0.6, -2.4, 1.6]}"
-shot box-merge 480 400 "{$BALLS, \"shape\": \"box\", \"sampling\": \"band\"}"
-# A developable surface: the capped cylinder, near-surface samples.
-CYLS="\"shape\": \"cylinder\", \"sampling\": \"band\", \"cam\": [1.6, -2.2, 1.5]"
-shot cylinder-patches 480 400 "{$REC, $CYLS, \"recMethod\": \"patches\"}"
-shot cylinder-merge 480 400 "{$BALLS, $CYLS}"
-shot cylinder-collapse 480 400 "{$REC, $CYLS, \"recMethod\": \"collapse\"}"
-# The fandisk (a CAD model: planes, cylinders, cones), near-surface samples, if the mesh is available.
+# The comparison grid of RECOVERY.md: every shape (1500 near-surface samples) by every method, with the
+# raw power contour (colored by face type) with sample spheres and with tangent balls as the first columns. Shot names: cmp-<shape>-<method>.
+CMP="$BASE, \"npts\": 1500, \"sampling\": \"band\", \"sScale\": 0.1, \"pcOp\": 0, \"pcEdges\": false"
 FANDISK="${FANDISK:-$PWD/../../code-release/examples/fandisk.obj}"
-if [ -f "$FANDISK" ]; then
-  FAN="\"obj\": \"file://$FANDISK\", \"sampling\": \"band\", \"cam\": [1.7, -2.2, 1.6]"
-  shot fandisk-patches 480 400 "{$REC, $FAN, \"recMethod\": \"patches\"}"
-  shot fandisk-merge 480 400 "{$BALLS, $FAN}"
-  shot fandisk-regions 480 400 "{$REC, $FAN}"
-  shot fandisk-collapse 480 400 "{$REC, $FAN, \"recMethod\": \"collapse\"}"
-fi
-# Collapse and flip (Approach 5); the cylinder and fandisk shots are above.
-shot torus-collapse 480 400 "{$REC, \"shape\": \"torus\", \"recMethod\": \"collapse\"}"
+cmpshape() { # name "shape json fragment"
+  shot cmp-$1-contour 480 400 "{$CMP, $2, \"recMethod\": \"off\", \"pcOp\": 1, \"pcColorBy\": \"type\", \"pcEdges\": true}"
+  shot cmp-$1-ballcontour 480 400 "{$CMP, $2, \"balls\": true, \"recMethod\": \"off\", \"pcOp\": 1, \"pcColorBy\": \"type\", \"pcEdges\": true}"
+  for m in regions extend patches collapse; do shot cmp-$1-$m 480 400 "{$CMP, $2, \"recMethod\": \"$m\"}"; done
+  shot cmp-$1-merge 480 400 "{$CMP, $2, \"balls\": true, \"recMethod\": \"merge\"}"
+}
+cmpshape torus '"shape": "torus"'
+cmpshape twospheres '"shape": "twospheres", "cam": [0.6, -2.4, 1.6]'
+cmpshape box '"shape": "box"'
+cmpshape cylinder '"shape": "cylinder", "cam": [1.6, -2.2, 1.5]'
+[ -f "$FANDISK" ] && cmpshape fandisk "\"obj\": \"file://$FANDISK\", \"cam\": [1.7, -2.2, 1.6]"
 rm -f "$TMP"
+python3 figures/montage.py

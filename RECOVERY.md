@@ -1,660 +1,274 @@
 # Recovering a surface from the power contour
 
-This note describes the structure of the power contour of samples plus tangent points, and five ways to turn it into a surface with one face per tangent point: *Contract contour regions*, *Extend own faces*, *Triangulate step patches*, *Merge steps into faces* on a diagram with different generators (*tangent balls*), and *Collapse and flip*, which post-processes Triangulate step patches' dual triangulation. Code: `recover.js` (`recoverSurface`, `extendOwnFaces`, `triangulatePatches`, `tangentBallSites`, `mergeSteps`, `qefTruncated`). Another method, *Clip tangent planes*, is described in `ARCHITECTURE.md`.
+**Goal.** From SDF samples we know, for each sample `p_a`, its tangent point `t_a` (the closest surface point) and the normal `n_a` there. The power contour of the samples and their tangent points is a closed surface, but it is lumpy and far more complex than the data warrants. Among its faces, the ones that contain a tangent point carry trustworthy information: a point and its tangent plane. We want a surface made *only* of such facets: one planar polygon per tangent plane, containing its tangent point, with neighboring polygons sharing edges. This note explains the structure of the contour that makes this possible, five ways we tried to get there, how their outputs compare, and which ideas in them are worth keeping.
 
-## Setup
+| | method | one-line idea | code |
+|---|---|---|---|
+| 0 | the power contour | the baseline: faces between `+` and `−` cells | `powerdiagram.js` |
+| 1 | Contract contour regions | give every other face to a tangent point; intersect planes where regions meet | `recoverSurface` |
+| 2 | Extend own faces | grow each tangent-plane face until it meets its neighbors' planes | `extendOwnFaces` |
+| 3 | Triangulate step patches | remove each patch of non-tangent faces by triangulating the loop of faces around it, using the planes to choose | `triangulatePatches` |
+| 4 | Tangent balls + Merge steps into faces | change the generators so the other faces almost lie in the planes, then merge them in | `tangentBallSites`, `mergeSteps` |
+| 5 | Collapse and flip | repair Approach 3's connectivity with plane-only tests | `triangulatePatches` (option `rank`) |
+| — | Clip tangent planes | clip each plane by its neighbors' planes (an earlier method; see `ARCHITECTURE.md`) | `clipTangentPlanes` |
+
+Reproducing: the numbers come from `node figures/compare.js [n] [random|band]`, the 2D figures from `node figures/make2d.js`, the 3D figures from `bash figures/shoot3d.sh` (headless Chrome; the fandisk needs `../../code-release/examples/fandisk.obj`). The earlier, piecemeal version of this note, with every experiment log, is `RECOVERY.md` at commit `a9b3cf2`.
+
+## 1. Background
+
+### 1.1 The data and the sites
 
 For each sample `p_a` with SDF value `d_a ≠ 0`:
 
-- the **tangent point** `t_a` is its closest surface point, and `n_a = (p_a − t_a) / d_a` is the outward unit normal there (the SDF gradient);
-- the **tangent plane** is `P_a = { x : f_a(x) = 0 }` with `f_a(x) = n_a · (x − t_a)`;
-- the sample is a site with weight `d_a²` (a sphere of radius `|d_a|` that touches the surface at `t_a`) and sign `sign(d_a)`;
+- the tangent point `t_a` is its closest surface point, and `n_a = (p_a − t_a) / d_a` is the outward unit normal there;
+- the tangent plane is `P_a = { x : f_a(x) = 0 }`, with `f_a(x) = n_a · (x − t_a)`;
+- the sample is a site with weight `d_a²` (a sphere of radius `|d_a|` touching the surface at `t_a`) and sign `sign(d_a)`;
 - the tangent point is a site with weight 0 and the opposite sign.
 
-The trusted data are `t_a`, `n_a`, and the sign of `d_a`. The power contour is the set of faces between a `+` cell and a `−` cell. Each site has an *owner*: the sample it comes from.
+The trusted data are `t_a`, `n_a` and the sign. Both sites of a sample have that sample as their *owner*.
 
-The figures in 2D are computed with the same constructions in the plane (a 2D power diagram of samples and tangent points on the union of two ellipses, which has two concave creases). In 2D a tangent plane is a line, a face is a segment, and a vertex is where two lines meet. The 3D figures are screenshots of the viewer. To regenerate them: `node figures/make2d.js` and `bash figures/shoot3d.sh`.
+### 1.2 The power contour (the baseline)
+
+The power contour is the set of faces between a `+` cell and a `−` cell. It is closed and watertight by construction. Its faces are of two kinds.
+
+**Own faces lie exactly in the tangent planes.** For `p = t + d n`, the power difference of a sample and its tangent point is
+
+```
+π_p(x) − π_t(x) = |x − p|² − d² − |x − t|² = −2 d · f(x),
+```
+
+so their bisector is the tangent plane. This holds for every sphere tangent to `P_a` at `t_a`, whatever its radius or side. The two cells of owner `a` form a *super cell* `C_a`, and the face between them, the **own face** `F_a = P_a ∩ C_a`, is a convex polygon in the tangent plane that contains `t_a`. There is exactly one per tangent point. These are the "good" facets.
+
+**Steps are everything else.** Every other contour face lies on a wall between two super cells, between the lines where `P_a` and `P_b` cross that wall. A step exists because neighboring tangent planes do not meet on the wall. Generically **own faces never share an edge**: an edge of `F_a` has a third cell from another owner, so a step lies across it. (The sphere is the exception: by symmetry the planes meet exactly on the bisectors.)
 
 ![One outside sample p, its tangent point t, the circle of radius d about p touching the surface at t, and the normal n. Their two cells, outlined, form the super cell; the own face is the part of the tangent line inside it.](figures/fig-setup.svg)
 
-*One sample `p` (sphere of radius `d`) and its tangent point `t`. Their two cells together (outlined) are the super cell `C`; the boundary between them is the own face `F`, which lies exactly in the tangent line (dotted). Note that `p` is not inside the outlined cell: neighbors' larger spheres take that space, as is common in power diagrams.*
-
-## Structure
-
-**1. The bisector of a sample and its tangent point is the tangent plane.** With `p = t + d n`:
-
-```
-π_p(x) − π_t(x) = |x − p|² − d² − |x − t|² = −2 d · n·(x − t) = −2 d · f(x).
-```
-
-This holds for any sphere tangent to `P_a` at `t_a`, whatever its radius. That is what makes the sphere scale below possible.
-
-**2. Super cells and own faces.** The two cells of owner `a` together form a *super cell* `C_a`. Inside `C_a`, the boundary between them is exactly where their powers are equal, which is `P_a`. So the **own face** is
-
-```
-F_a = P_a ∩ C_a,
-```
-
-a convex polygon lying exactly in the tangent plane. There is exactly one per tangent point, and it contains `t_a`: at `t_a` both sites have power 0, and every other site has positive power (for an exact SDF, `t_a` is outside every other sample's sphere).
-
-**3. Steps.** Every other contour face lies on a wall between two super cells `C_a` and `C_b`. On the wall, `P_a` and `P_b` cut two different lines; the step is the region between them (a double wedge with its apex where the line `P_a ∩ P_b` crosses the wall). Steps exist because neighboring tangent planes do not meet on the wall.
+*2D: one sample `p` (circle of radius `d`) and its tangent point `t`. Their two cells together (outlined) are the super cell; the boundary between them, the own face, lies in the tangent line.*
 
 ![The 2D power diagram of 70 samples and their tangent points. Almost the whole contour is own faces; steps are visible only at the two concave creases, and the inset magnifies a step on a smooth part 63 times.](figures/fig-structure.svg)
 
-*2D, `s = 1`: the contour (thick) is own faces (gold) joined by steps (red). In 2D, steps on smooth parts are tiny (median length `10⁻⁴` against `0.08` for own faces; inset, ×63); the visible ones are at the concave creases, where the two sides' tangent lines meet inside the shape.*
+*2D: own faces (gold) joined by steps (red). In 2D the steps on smooth parts are tiny (inset, ×63); the visible ones are at concave creases.*
 
 ![The torus contour in 3D, sliced at z = 0, colored by face type: green own faces, purple steps, a few gold sample–sample faces.](figures/torus-contour.png)
 
-*3D, torus, 300 samples, `s = 1`, sliced at `z = 0`, colored by face type: own faces (green, each in its tangent plane), steps (purple: sample – other tangent point), and sample – sample faces (gold). In 3D a step is a polygon on a wall between super cells, and steps take a visible share of the contour.*
+*3D, torus, 300 samples, sliced: own faces (green) and steps (purple, gold). In 3D steps take a visible share of the contour.*
 
-**4. Own faces never share an edge** (generically). A corner of `F_a` is a power-diagram vertex with four cells, two of which belong to `a`, so it touches at most three owners. An edge of `F_a` has a third cell from another owner, so across it is a step. The exception is a degenerate configuration: on a sphere, by symmetry, `P_a ∩ P_b` lies exactly in the bisector, so there are no steps and the contour already is the tangent-plane polyhedron.
+The contour is the "lumpy surface": it has up to 6 times as many faces as there are tangent points (torus 8964 for 1500), and on shapes with flat or developable parts its steps reach far out (the spikes in the first column of the comparison in §3). On the box with 1500 near-surface samples its vertices are up to 1.0 off the surface and its area is 9.75 against 6.64.
 
-**5. The goal.** Eliminate the steps: extend each own face in its plane until it meets its neighbors' planes. The result has one face per tangent point, edges on the lines `P_a ∩ P_b`, and vertices at the points `P_a ∩ P_b ∩ P_c`. Equivalently, move the walls between super cells so they contain the lines `P_a ∩ P_b`. Then the function `F(x) = f_{a(x)}(x)`, where `a(x)` is the super cell containing `x`, becomes continuous, and its zero set is watertight.
+### 1.3 The target, and its dual
 
-**6. The dual view.** In the regular (weighted Delaunay) triangulation, contour faces are edges between a `+` site and a `−` site. Eliminating the steps means collapsing the edge between each sample and its tangent point. An edge collapse keeps a valid surface only when the link condition holds. Wide steps, which touch several different owners along their length, violate it. They come from large sample spheres, whose cells reach far.
+Eliminate the steps: extend each own face in its plane until it meets its neighbors' planes. The result has one face per tangent point, edges on the lines `P_a ∩ P_b`, and vertices at the points `P_a ∩ P_b ∩ P_c`.
 
-## Sphere scale `s`
+It is easiest to think about in the **dual**: one dual vertex per facet (per tangent point), one dual edge per pair of adjacent facets, one dual triangle per output vertex. A choice of *connectivity* is a triangulation of the tangent points; given it, the *geometry* is determined: every vertex is the intersection of its three planes. All five methods are different ways to choose this triangulation (explicitly or implicitly) and to cope with triangles whose three planes do not meet nearby.
 
-Move each sample toward its tangent point and shrink its sphere so it stays tangent there:
+In the power diagram's own dual (the weighted Delaunay triangulation), eliminating steps means collapsing the edge between each sample and its tangent point. Edge collapses keep a manifold only under the link condition, which wide steps violate; this is why simply "collapsing" is not enough.
 
-```
-p_a(s) = t_a + s (p_a − t_a),   weight (s d_a)².
-```
+### 1.4 Sphere scale `s`
 
-By (1), the own face of every tangent point is unchanged for every `s`; only the steps change. The data `t_a`, `n_a`, `sign(d_a)` are untouched. Since `π_{p(s)}(x) − π_t(x) = −2 s d f(x)`, the super cells converge as `s → 0` to the Voronoi cells of the tangent points, each split by its tangent plane. The steps become thin: their height is set by how far neighboring planes miss each other on the Voronoi bisector, about `κh²` for curvature `κ` and spacing `h`.
+Move each sample toward its tangent point and shrink its sphere so it stays tangent: `p_a(s) = t_a + s (p_a − t_a)`, weight `(s d_a)²`. By §1.2 the own faces do not change; only the steps do. As `s → 0` the super cells become the Voronoi cells of the tangent points, each split by its plane, and steps thin to about `κh²` (curvature × spacing²). `s = 0.1` is the default for Approaches 1–3 and 5. Very small `s` runs into the absolute tolerance `1e-10` of `powerdiagram.js` (the plane is resolved only to about `1e-10 / (2 s |d|)`).
 
 ![The same samples at sphere scale 1 and 0.1. The own faces are identical; the cells around them change, and the steps at the creases change length.](figures/fig-sphere-scale.svg)
 
-*Sphere scale in 2D. The own faces (gold) are identical at `s = 1` and `s = 0.1`, as (1) predicts; only the cells and the steps change. At `s = 0.1` the tangent points' cells approach their Voronoi cells. At the lower concave crease the step gets longer, not shorter: it approaches the Voronoi bisector of the two tangent points on either side of the crease, while the true crease is where their tangent lines meet.*
+*Sphere scale in 2D: identical own faces at `s = 1` and `s = 0.1`; only the cells and steps change.*
 
-## Approach 1: Contract contour regions (`recoverSurface`)
+### 1.5 Placing a vertex: far intersections and the trust region
 
-Each step is given to one of its two owners, so the contour is partitioned into one region per tangent point.
+Approaches 1, 2, 3 and 5 place each vertex where its faces' planes meet (`qefTruncated`: least squares on `Σ (n_k · x − n_k · t_k)²` about the contour vertex). With exact data, three independent planes meet at one exact point. The trouble is that this point can be very far away: three tangent planes 0.1 apart, with normals within 12° of each other but nearly coplanar, meet 600 units away. This is not round-off (the points satisfy their planes to `10⁻¹²`); the planes are simply not valid that far out. It happens where neighboring normals vary in one direction only: cylinders, cones, the torus's top and bottom circles (`K = 0`).
 
-1. Weld the contour's vertices (each cell computes its own copy; repeated corners of tiny faces are dropped). Label each own face with its owner. Label each step with whichever of its two owners has the nearer tangent point (measured from the face's centroid).
-2. Clean up so each region is one connected piece containing its own face. A stray component goes to its other owner, or else to its most common neighboring region. A region enclosed by a single other region is merged into it.
-3. Output vertices: contour vertices where three or more regions meet, placed where those regions' tangent planes meet (see *Vertex placement*).
-4. Output faces: each region's boundary on the contour, keeping only the output vertices on it. Regions that are not discs still become faces (see *Topology of the regions*), so no region is dropped.
+The underlying cause is combinatorial: the contour's adjacency is isotropic (Voronoi-like), while the arrangement of the planes is anisotropic there (long faces along the flat direction). The contour names a triple of faces that are not neighbors in the planes' arrangement.
 
-Because the regions tile the contour, neighboring faces share their boundary and vertices by construction, so the result is closed. The nearest-tangent-point rule already imposes Voronoi locality on the regions, which is why this method depends little on `s`.
+Two guards exist:
 
-![Left: the contour at s = 0.1 colored by region, one color per tangent point. Right: the recovered polygon, with vertices where neighboring regions' tangent lines meet, follows the true curve including both creases.](figures/fig-contract.svg)
+- **Dependent planes `tau`**: drop directions whose eigenvalue in `Σ n nᵀ` is below `tau × λ_max`. `10⁻¹²` (default) only removes exact degeneracies, such as coplanar box faces. `10⁻²` would remove the far points, but also the exact corners of the box.
+- **Trust radius**: a vertex may move at most `trust × (distance to the farthest of its tangent points)` from its contour position (default `trust = 2`). Within it, the exact intersection is used; beyond it, the nearest point on the line of the two best-determined planes, or on their average plane.
 
-*Contract contour regions in 2D, `s = 0.1`. Left: each contour edge colored by the region (tangent point) it is given to; the long crease steps go to one side. Right: one vertex where each pair of neighboring regions meets, at the intersection of their tangent lines (green), giving a polygon with one edge per tangent point. Every vertex here is the exact intersection, within the trust region; the farthest is 0.022 off the curve.*
+![Near an inflection, the tangent lines at two neighboring points are nearly parallel and meet far away. The trust region excludes that intersection.](figures/fig-far-intersection.svg)
 
-## Approach 2: Extend own faces (`extendOwnFaces`)
-
-Steps are not assigned to anyone; each own face is extended from its own boundary.
-
-1. Walk around `F_a`. Each edge borders a step toward one neighbor `b`: the owner of the third cell at that edge.
-2. A run of edges facing the same `b` becomes part of the line `P_a ∩ P_b`.
-3. A switch from neighbor `b` to neighbor `c` happens at a corner whose four cells are two of `a`'s, one of `b`'s and one of `c`'s. It becomes the vertex `P_a ∩ P_b ∩ P_c`, keyed by the triple `{a, b, c}` and so shared with faces `b` and `c` if they see the same triple.
-4. *Flips.* Where four owners meet nearly at one point, the faces can disagree about which diagonal is an edge, so a triple is seen by fewer than its three faces. Incomplete triples linked by sharing two owners are merged into one vertex where all of their planes meet, if they involve at most four owners ("Merge flipped junctions"). Other disagreements leave cracks.
-
-This is the most literal form of "one face per tangent point, eliminate the rest", but because each face decides its neighbors alone, it leaves more cracks than the partition. It depends strongly on `s`: large spheres make wide steps, whose far ends are seen differently by different faces.
-
-![Extend own faces in 2D at s = 0.1. Left, with neighbors read from the third cell at each end, faces at the creases name different neighbors and leave cracks. Right, joining consecutive own faces along the contour, the polygon is closed.](figures/fig-extend.svg)
-
-*Extend own faces in 2D, `s = 0.1`. Left: the rule `extendOwnFaces` uses, where each end of an own face names the owner of the third cell there. On smooth parts it matches the contraction (max error 0.022). At the creases tangent points crowd together and the steps between two own faces pass through cells of a third owner, so face `a` names `b` while `b`'s nearest end names `c`: the relation is not symmetric, and the unmatched ends are cracks (red, 6). Right: the chain rule. Walk the contour; between consecutive own faces `a` and `c`, delete the steps and join `a` and `c` at `P_a ∩ P_c`. The neighbor relation now comes from the contour's connectivity, so it is symmetric and there are no cracks (0 open ends). One tangent point is dropped: its own face is alone on a tiny separate contour loop.*
-
-Cracks are therefore an artifact of reading neighbors locally, not of the topology. In 3D the chain rule needs one more decision: a connected patch of steps can touch many own faces, and deleting it must say which of them become adjacent and where they meet. Contract contour regions makes that decision by giving each step to one of its owners.
-
-## Approach 3: Triangulate step patches (`triangulatePatches`)
-
-Own faces are kept, and the steps between them are removed patch by patch. The triangulation that joins the own faces around each patch is chosen from the tangent planes rather than from distances between tangent points.
-
-### Step patches
-
-Own faces never share an edge (generically), but they often touch at a corner. So the steps fall into many small connected patches (edge-adjacent step faces), each bounded by a loop that visits own faces `a_1 … a_k`. Measured with 1500 uniform samples, `s = 0.1`:
-
-| | step patches | loops by `k` | patches with holes |
-|---|---|---|---|
-| torus | 1395 | `k = 3`: 48%, `k = 4`: 25%, `k ≥ 5`: 27% (up to 18) | 2 |
-| two spheres | 5, all along the crease (`k` = 7 to 24) | elsewhere own faces meet directly (the sphere's degeneracy) | 0 |
-| box | 9, large and flat (`k` up to 906) | the own faces of a flat side are islands in one patch | 2 |
-
-Removing a patch means joining the planes `P_{a_1} … P_{a_k}`. Intersecting consecutive pairs gives the lines `P_{a_i} ∩ P_{a_{i+1}}`, and consecutive lines meet at `P_{a_{i−1}} ∩ P_{a_i} ∩ P_{a_{i+1}}`. For `k = 3` that is one point, a clean vertex. For `k > 3` it is a small skew polygon in no tangent plane. Instead, triangulate the loop: a triangulation of the `k`-gon of own faces has `k − 2` triangles, each a vertex `P_a ∩ P_b ∩ P_c`, and its diagonals are the pairs of faces that become adjacent across the patch. The hole closes with no extra face, and every face stays in a tangent plane. The choice of triangulation is the real decision (Contract contour regions makes it implicitly, by nearest tangent point).
-
-### Choosing the triangulation: envelopes
-
-Locally the surface is a height function `z = ½ xᵀQx` over its tangent plane, with `Q` the second fundamental form. For tangent points `a, b, c` on such a quadric (checked numerically to rounding error):
-
-- the three tangent planes meet above the *Q-circumcenter* of `a, b, c` (the point equidistant from them in the quadratic form `Q`), at height error exactly `−½ R_Q²`, where `R_Q` is that Q-circumradius;
-- with unnormalized normals `(−Qa, 1)`, `det(n_a, n_b, n_c) = 2 K · area(abc)`, where `K = det Q` is the Gaussian curvature.
-
-Where `Q` is definite (a convex or concave patch), the triangulation that minimizes the error is the Delaunay triangulation in the metric `Q`. That is the dual of an envelope of the planes: the surface is the boundary of the intersection of the half-spaces `f_a ≤ 0` (convex) or of their union (concave). An envelope of affine functions is itself a power diagram, so its dual is a regular triangulation of the planes (Aurenhammer 1987): the "change of generators" is that the triangulation comes from the planes, not the samples. Envelopes also handle features exactly: a box corner is the intersection of its three half-spaces, and a concave crease is a union.
-
-Whether a loop edge is convex or concave can be read from the data alone, with no curvature estimate: for consecutive faces `a, b`, the edge is convex if `f_a(t_b) + f_b(t_a) < 0` (each tangent point lies below the other's plane) and concave if `> 0`. On the torus (1500 samples, `s = 0.1`), 1073 of the 1082 loops on the outer half (`K > 0`) are all convex, while 210 of the 312 on the inner half (`K < 0`) mix convex and concave edges.
-
-### Saddles
-
-On a saddle (`K < 0`) the surface crosses its tangent planes, so it is neither envelope. In terms of normals, the Gauss map reverses orientation: a triangle of tangent points maps to a triangle of normals with the opposite orientation, so no envelope of the planes can follow the surface.
-
-Locally, a polyhedral saddle is a max of mins of its planes: every piecewise-linear function has such a lattice (max–min) representation (Ovchinnikov 2002). Around the loop, runs of convex edges alternate with runs of concave edges. Grouping the faces into runs joined by convex edges, the surface is the union of the groups' intersections ("max–min"). Grouping them into runs joined by concave edges, it is the intersection of the groups' unions ("min–max"). For `k = 4` with alternating edges, the two readings are `max(min(a,b), min(c,d))` and `min(max(b,c), max(d,a))`, and they are exactly the two diagonals of the loop. This is the same ambiguity as the saddle face of marching cubes, which the asymptotic decider of Nielson and Hamann (1991) resolves from the data. Here the data are the planes, and the decider compares the two readings (below).
-
-Saddles are not where vertices fly off. Since `det = 2K · area`, a saddle triangle is as well-conditioned as a convex one with the same `|K|`, and its error `½|R_Q²|` stays of order curvature × spacing² (it is even 0 when a side lies along an asymptotic direction). The real trouble is near `K = 0`, such as the torus's top and bottom circles: there `det → 0` for every triangle and the Q-circumcenter runs off along the flat direction, so no triangulation helps. That is the far-vertex problem diagnosed above, and the trust region still handles it.
-
-### The algorithm
-
-1. Weld and partition the contour exactly as Contract contour regions does, including its cleanup: own faces are labeled by their owner, each step by the nearer of its two owners. Own faces are the faces between a sample and its own tangent point; all others are steps.
-2. Find the step patches. Walk each patch's boundary and list the faces around it, in order: the own face across each boundary edge, and, at each boundary vertex, every labeled face passed when rotating around that vertex outside the patch (own faces that touch the patch only at a corner, and steps of patches handled in step 6, with their labels).
-3. A patch with a single loop of 3 to 24 faces is triangulated by the `O(k³)` minimum-cost polygon triangulation dynamic program (Klincsek 1980). Each triangle's vertex is the intersection of its three planes, placed by `qefTruncated` with the trust region, anchored at the loop corners of its three faces. The cost of a triangle is how far its vertex violates the reading: the planes of its own groups must be on the expected side (`f ≤ 0` for max–min, `f ≥ 0` for min–max), and it must not be strictly inside (outside) any other group. For an all-convex or all-concave loop both readings reduce to the envelope, and an envelope triangulation costs 0. A diagonal between two faces that are already adjacent on another loop costs a large constant, since it would make them adjacent twice.
-4. The decider. For a saddle loop, run the dynamic program under both readings and keep the cheaper, unless one reading has at most 2 groups and the other at least 4: long runs of one convexity, such as the two sides of the two-sphere crease, are strong evidence for the coarser reading. (Comparing costs alone chose the wrong reading on two crease patches, which left vertices 0.42 off.)
-5. Every other contour vertex where three or more labels meet is a loop too, with its labels in rotation order: own faces meeting with no step between them (most of each sphere, by the degeneracy noted in *Structure*), and the junctions of the partition inside the remaining patches. Loops of 4 or more labels go through steps 3 and 4.
-6. A patch with exactly two loops (a ring of steps, or an own face as an island inside steps) is stitched: the contour tiling dynamic program of Fuchs, Kedem and Uselton (1977). Both loops have the patch on their left, so sweeping around the patch goes forward along one loop and backward along the other; each step adds a triangle with an edge of one loop and a corner on the other, with the envelope cost of step 3 (convex: other planes above the vertex; concave: below; saddle: as close as possible). All starting pairs are tried. An island is a fan.
-7. The remaining patches (more loops, such as a flat side of the box with its own faces as islands, and loops longer than 24) keep the partition from step 1, so their triangles are the partition's junctions from step 5. If such a patch is convex or concave, its triangles are then flipped toward the envelope (Lawson's algorithm): for triangles `(a, b, c)` and `(a, c, d)`, edge `ac` is flipped when that lowers how far planes `d` and `b` are on the wrong side of the vertices, the quad is convex, and the new edge does not exist yet. On a quadric this test is the in-circle test in the metric `Q`. Flat patches keep the partition, which is already the Delaunay tie-break, and so do saddle patches, where flips do not settle. Why the partition is the right start, and not a fallback, is explained below.
-8. Vertices are clipped to their footprint. A triangle's vertex is the exact intersection of its three planes when that lies within the trust radius of its anchor. Otherwise it becomes a small *chamfer*: one point on each line `P_a ∩ P_b`, the point of that line nearest the anchor, joined by an extra face (orange in the viewer). Each tangent-plane face then contains only points of its own plane, so it is exactly planar, unlike the trust region, which pulls a vertex off its planes. Where two planes are so nearly parallel that their line is also beyond the trust radius, that one point stays within the radius on the pair's average plane. "Chamfer far vertices" off restores the trust region.
-9. Output faces are the duals: each own face's polygon is the cycle of triangles around it. Every loop is counterclockwise seen from outside and the dynamic program keeps loop order, so each triangle `(a, b, c)` has the directed edges `a → b → c → a`. Each directed edge is glued to a twin with the opposite direction. Where the same three faces meet at two places there are two copies of each, paired by nearest anchors. Around `a`, triangle `(a, b, c)` is followed by its twin across `c → a`, which is `(a, c, d)`. Following twins gives consistently oriented faces, even with the duplicates. A chamfered triangle `(a, b, c)` contributes its two points on `P_a ∩ P_b` and `P_a ∩ P_c` to `a`'s face, and its three points form the chamfer face.
-
-### Patches the planes do not decide
-
-Which patches are left for step 7? With 1500 samples at `s = 0.1`: 1 of 1395 on the torus, none on the two spheres, and 4 of 9 on the box. The box's are its flat sides: one patch of steps with the side's own faces as islands. There every plane is the same plane, so the envelope is a complete tie and every triangulation gives the same flat geometry. Only the connectivity remains to choose, and the natural tie-break is the Delaunay triangulation of the tangent points. Restricted to the patch, that is the dual of the restricted Voronoi diagram of the tangent points, and the nearest-tangent-point partition is exactly that Voronoi diagram, restricted to the contour. So the partition is the tie-break, computed directly. Its junctions are the Delaunay triangles, and the contraction's cleanup keeps it topologically sound.
-
-Two alternatives were tried and rejected:
-
-- *Joining the loops of a patch with keyhole bridges, ear clipping, inserting islands one at a time, and then flipping toward the envelope* (Lawson's algorithm, with the plane test "is plane `d` on the envelope's side of the vertex `P_a ∩ P_b ∩ P_c`?", which on a quadric is the in-circle test in the metric `Q`). Without geometry, ear clipping a long loop with repeated faces folds, and flips cannot undo a fold: the box got up to 287 hole edges.
-- *Starting from the whole contraction and flipping every edge toward the envelope.* Even with Lawson's convexity condition, saddle quads keep flipping back and forth (about 148 000 flips on the torus), and the result was no better than the start (64 vertices off, against 14 with the patch dynamic program).
-
-An earlier version of step 7 partitioned only the patch, by nearest tangent point among the faces around it, without the contraction's cleanup. That left 20 to 34 hole edges on the box. Sharing step 1 with Contract contour regions removed them, apart from the corner case below.
-
-### Results
-
-1500 samples unless noted, `s = 0.1`, exact `tau`, trust 2; "off" counts vertices with `|sdf| > 0.02`:
-
-| | Contract contour regions | Triangulate step patches |
+| exact intersections, no trust region | `tau = 10⁻²` | exact + trust 2 (default) |
 |---|---|---|
-| torus, uniform | max 0.076, 64 off, 0 hole edges | **max 0.055, 14 off**, 0 hole edges |
-| torus, uniform, `s = 1` | max 0.076, 65 off, 0 | max 0.096, **22 off**, 0 |
-| torus, 300 uniform | max 0.240, 173 off, 0 | **max 0.208, 120 off**, 0 |
-| torus, near surface | max 0.033, 24 off, 0 | max 0.035, **2 off**, 0 |
-| two spheres, uniform | max 0.067, 27 off, 0 | max 0.163, 34 off, 0 |
-| two spheres, near surface | max 0.056, 8 off, 0 | max 0.127, 9 off, 0 |
-| two spheres, 300 near surface | max 0.090, 129 off, 0 | max 0.090, 129 off, 0 |
-| box, uniform | exact, 0 hole edges | exact, 8 hole edges (of length 0) |
-| box, 300 uniform | exact, 0 | exact, 0 |
+| ![Torus with exact intersections: long spikes.](figures/torus-exact.png) | ![Torus with tau = 1e-2: no spikes.](figures/torus-tau.png) | ![Torus with exact intersections in a trust region: no spikes.](figures/torus-trust.png) |
 
-On smooth surfaces, choosing the triangulation from the planes puts far more vertices on the surface (14 instead of 64 off on the torus). The crease is visually cleaner, with fewer fins, but its worst vertices are farther off. The table is without chamfers and stitching (steps 6 and 8); their effect, with "off-plane" the largest distance from a face's vertex to its own tangent plane:
+*Torus, 1500 uniform samples, Contract contour regions. Left: vertices fly up to 615 units away (area 41.9 against 8.88). Middle and right: the far points are gone; only the trust region also keeps the box exact.*
 
-| | neither | stitching only | chamfers only | both (default) |
-|---|---|---|---|---|
-| torus, 300 | max 0.208, 120 off, off-plane 0.41 | same | max 0.288, 137 off, off-plane 0.32 | as chamfers only |
-| torus, `s = 1` | max 0.096, 22 off, off-plane 0.024 | max 0.126, 28 off | max 0.099, 32 off, off-plane `10⁻¹³` | max 0.126, 38 off, off-plane `10⁻¹³` |
-| torus, 1500 | max 0.055, 14 off, off-plane 0.008 | same | max 0.055, 14 off, off-plane `10⁻¹³` (310 chamfers) | as chamfers only |
-| two spheres | max 0.163, 34 off, off-plane 0.033 | same | max 0.163, 37 off, off-plane 0.018 | as chamfers only |
-| two spheres, near surface | max 0.127, 9 off, off-plane 0.011 | same | max 0.127, 18 off, off-plane 0.012 | as chamfers only |
-| box, 300 | exact, 0 hole edges | same | exact, 6 chamfers | exact |
+A useful fact for choosing triangles: on a surface locally `z = ½ xᵀQx`, three tangent planes meet above the `Q`-circumcenter of their tangent points, at height error `−½ R_Q²`, and `det(n_a, n_b, n_c) = 2K · area`. So the best triangulation on a convex or concave patch is the Delaunay triangulation in the metric `Q`, and near `K = 0` every triangle is ill-conditioned, whatever the triangulation.
 
-- *Chamfers* make the faces exactly planar where no two planes are nearly parallel (off-plane `10⁻¹³` on the torus at 1500 samples, against 0.008), with the same worst error there. A chamfer replaces one vertex by three points, so the count of vertices off by more than 0.02 rises somewhat. Where planes are nearly parallel (the sparse torus, the crease) some chamfer points must stay off their planes, and the worst error can grow (0.208 to 0.288 on the 300-sample torus).
-- *Stitching* applies only to patches with exactly two loops: 1 on the torus at 1500 samples and `s = 0.1` (no change), 11 at `s = 1`, where it is slightly worse than the partition (max 0.126 against 0.096). Its saddle cost is the plain closeness to the other planes, without the two readings of step 4.
-- *Envelope flips* on the partitioned patches find almost nothing to change: 0 flips on the box at 1500 samples and 1 at 300. There the partition's Delaunay triangulation already satisfies the envelope test, because the box's planes are coplanar or meet at right angles along its edges.
+## 2. The methods
 
-| torus | two spheres | box |
-|---|---|---|
-| ![Torus recovered by triangulating step patches.](figures/torus-patches.png) | ![Two spheres recovered by triangulating step patches: the crease has fewer fins.](figures/twospheres-patches.png) | ![Box recovered by triangulating step patches: exact flat faces, edges and corners.](figures/box-patches.png) |
+### Approach 1: Contract contour regions (`recoverSurface`)
 
-### Parameters
+**Idea.** Paint the contour: every own face gets its owner's color, and every step gets the color of whichever of its two owners has the nearer tangent point. Each color is then one region per tangent point, and the regions tile the contour. Shrink each region to a polygon whose corners are where three or more regions meet, placed where those regions' planes meet.
 
-Triangulate step patches uses three controls: the sphere scale `s` (it changes the power diagram, hence the step patches; the own faces stay the same), *Dependent planes* (`tau`) and *Trust radius* (`trust`). The last two place every vertex and so also enter the cost that chooses each triangulation. *Merge flipped junctions* and the clip sliders do not apply. Measured with 1500 uniform samples (and 1500 near-surface samples on the torus), varying one parameter at a time from the defaults `s = 0.1`, `tau = 10⁻¹²`, `trust = 2`; "off" counts vertices with `|sdf| > 0.02`:
+**Details.** After welding, a cleanup makes each region one connected piece containing its own face (stray components go to their other owner or their most common neighbor; enclosed regions merge). Regions that are not discs still become faces: split regions give one face per piece, pinched regions a weakly simple polygon, regions with own faces inside an annulus a face with a hole, and pieces with fewer than three junctions collapse to an edge. So no region is dropped and the result is closed by construction.
 
-| trust radius | torus | torus, near surface | two spheres | box |
-|---|---|---|---|---|
-| 1 | max 0.053, 13 off | max 0.018, 0 off | 36 off | max 0.065, 59 off |
-| 2 (default) | max 0.055, 14 off | max 0.035, 2 off | 34 off | exact |
-| 4 | max 0.055, 15 off | max 0.069, 6 off | 35 off | exact |
-| off | max 13.8, 86 off | max 10.3, 83 off | 36 off | exact |
+The nearest-tangent-point rule makes the regions the restricted Voronoi cells of the tangent points, and their junctions the restricted Delaunay triangles: the connectivity is *isotropic*. That is the natural tie-break on flat parts and robust everywhere, but wrong where the planes' arrangement is anisotropic.
 
-| dependent planes | torus | torus, near surface | two spheres | box |
-|---|---|---|---|---|
-| `10⁻¹²` (default) | max 0.055, 14 off | max 0.035, 2 off | 34 off | exact |
-| `10⁻²` | max 0.033, 9 off | max 0.013, 0 off | 38 off | max 0.046, 16 off |
+![Left: the contour at s = 0.1 colored by region. Right: the recovered polygon follows the true curve including both creases.](figures/fig-contract.svg)
 
-| `s` | torus | two spheres | box hole edges |
-|---|---|---|---|
-| 1 | max 0.096, 22 off | max 0.225, 33 off | 0 |
-| 0.3 | max 0.096, 17 off | max 0.163, 34 off | 0 |
-| 0.1 | max 0.055, 14 off | max 0.163, 34 off | 8 |
-| 0.03 | max 0.055, 16 off | max 0.163, 34 off | 4 |
-| 0.01 | max 0.055, 16 off | max 0.163, 34 off | 5 |
+*2D: each contour edge colored by its region (left); one vertex where neighboring regions meet, at the intersection of their tangent lines (right).*
 
-- **Trust radius** is required whenever `tau` is exact: without it, the vertices near `K = 0` fly off (max 13.8 on the torus). A radius of 1 cuts the box's corners short. 2 is the best compromise.
-- **Dependent planes** is the same trade-off as in Contract contour regions. `10⁻²` drops the ill-conditioned intersections, so smooth surfaces improve (the trust radius then no longer matters), but the box loses its exact corners. Use `10⁻²` for smooth shapes and the exact default for shapes with sharp features.
-- **Sphere scale** matters least. Smaller spheres give smaller step patches, which the dynamic program handles well, down to about `s = 0.1`; below that little changes. The two-sphere crease patches look the same at every scale. The box's zero-length corner hole edges appear only for `s ≤ 0.1` (none at 1 or 0.3), and at `s = 0.01` the near-surface torus gets 3 hole edges, consistent with the numerical floor on `s` noted above.
+### Approach 2: Extend own faces (`extendOwnFaces`)
 
-### Open problems in this approach
+**Idea.** The most literal version of the goal: leave steps unassigned, and let each own face grow in its plane. Walk around `F_a`; each edge faces a step toward some neighbor `b` (the owner of the third cell there), and a run of edges toward `b` becomes part of the line `P_a ∩ P_b`. Where the neighbor changes from `b` to `c`, place the vertex `P_a ∩ P_b ∩ P_c`, keyed by the triple `{a, b, c}` so that faces `b` and `c` find it too. Where four owners meet nearly at one point and faces disagree about the diagonal, incomplete triples sharing two owners are merged ("Merge flipped junctions").
 
-- **A box corner** (1500 samples): many tangent points coincide exactly at the corner, with different normals, and the triangles there are combinatorially inconsistent, leaving 8 hole edges. All their vertices are the corner point itself, so the gaps have zero length.
-- **Jagged faces near `K = 0`** (the torus's inner top circle in the screenshot): with chamfers every face there is planar, yet the region still looks folded. So the cause is the triangulation (which faces meet), not planarity. The true structure, long faces along the flat direction, is not built directly; the chamfers (310 on the torus, tiny orange slivers) only keep the vertices near the surface. Approach 5 (Collapse and flip) reworks the triangulation with flips toward the planes' envelope: on the torus the chamfers drop to 66 and the vertices off to 5, but the region near `K = 0` still looks folded, and on a cylinder the flips cannot build the long faces (tie quads).
-- **Stitching on saddles** uses closeness to the other planes; using the two readings of step 4 there might remove its loss at `s = 1`.
-- **The decider** combines a cost comparison with a structural rule (2 groups against 4). It fixes the crease patches but is heuristic.
-- **The crease's worst vertices** (0.16 off with uniform samples, against 0.067 for Contract contour regions).
+**What it teaches.** Each face reads its neighbors locally, so the neighbor relation is not symmetric: `a` names `b` while `b` names `c`, and the unmatched ends are cracks. In 2D, reading neighbors from the contour's connectivity instead ("join consecutive own faces along the contour", the chain rule) is crack-free. In 3D the chain rule needs a decision about which own faces become adjacent across a patch of steps, which is what Approaches 1 and 3 supply. Connectivity must be decided once, on a shared structure, not per face.
 
-References: F. Aurenhammer, Power diagrams: properties, algorithms and applications, *SIAM J. Computing* 16(1), 1987. H. Fuchs, Z. M. Kedem and S. P. Uselton, Optimal surface reconstruction from planar contours, *Communications of the ACM* 20(10), 1977. G. T. Klincsek, Minimal triangulations of polygonal domains, *Annals of Discrete Mathematics* 9, 1980. G. M. Nielson and B. Hamann, The asymptotic decider: resolving the ambiguity in marching cubes, *Proc. IEEE Visualization '91*, 1991. S. Ovchinnikov, Max-min representation of piecewise linear functions, *Beiträge zur Algebra und Geometrie* 43(1), 2002.
+![Extend own faces in 2D: neighbors read locally leave cracks; joining consecutive own faces along the contour is closed.](figures/fig-extend.svg)
 
-## Approach 4: Tangent balls (`tangentBallSites`, `mergeSteps`)
+### Approach 3: Triangulate step patches (`triangulatePatches`)
 
-Approaches 1–3 keep the power diagram and remove its steps afterwards, by intersecting tangent planes. Where three neighboring normals are nearly dependent (cylinders, cones, the torus's top and bottom circles), those intersections are far away, and the trust region or chamfers have to stop them. This approach changes the generators instead, so that the steps become small, and then uses the cells' own vertices: no plane intersection is ever computed.
+**Idea.** Keep every own face exactly. Because own faces often touch at corners, the steps form many small connected *step patches*, each surrounded by a loop of own faces `a_1 … a_k`. Removing a patch means making some of those faces adjacent: that is a triangulation of the `k`-gon of faces, `k − 2` triangles, each a vertex `P_a ∩ P_b ∩ P_c`. Choose the triangulation from the **planes**, not from distances between tangent points.
 
-### Theory
+**The planes' criterion.** Whether a loop edge is convex or concave is read from the data alone: `f_a(t_b) + f_b(t_a) < 0` is convex (each tangent point below the other's plane), `> 0` concave. Where all edges are convex, the surface is locally the boundary of the intersection of half-spaces `f ≤ 0` (an envelope); all concave, of their union. An envelope of planes is itself a power diagram (Aurenhammer), so the right triangulation is a regular triangulation of the planes: on a quadric, the Delaunay triangulation in the metric `Q`. On saddles, where convex and concave edges alternate, the surface is a lattice (max–min) polyhedron of its planes (Ovchinnikov): grouping faces by convex runs gives one reading, by concave runs the other, and for `k = 4` the two readings are exactly the two diagonals, the same ambiguity as the marching-cubes saddle (resolved here by comparing the two readings' costs, plus a rule preferring the coarser grouping).
 
-**1. Any ball tangent at `t_a` keeps the own face.** Give owner `a` a ball of radius `λ` tangent to `P_a` at `t_a` on side `σ ∈ {+1, −1}`: center `t_a + σλ n_a`, weight `λ²`, sign `σ`; and keep its tangent point (weight 0, sign `−σ`). Then
+**Algorithm.** (1) Start from Approach 1's painted contour. (2) Each single-loop patch with up to 24 faces is triangulated by the `O(k³)` minimum-cost polygon triangulation dynamic program (Klincsek), the cost of a triangle being how far its vertex violates the reading. (3) Patches with two loops are stitched (Fuchs, Kedem and Uselton). (4) Larger patches keep Approach 1's partition, flipped toward the envelope where convex or concave; on a flat side of the box every plane is the same, and the Delaunay tie-break of the partition is the right answer. (5) A vertex beyond the trust radius becomes a small *chamfer* (one point on each line `P_a ∩ P_b`, plus an extra face), so that every tangent-plane face stays exactly planar. (6) Faces are the duals: the cycle of triangles around each own face.
+
+**Limits.** Near `K = 0` (torus top circle, cylinders) the triangles still name non-neighbors in the planes' arrangement, and chamfers (310 on the uniform torus, 553 on the near-surface fandisk) only hide them.
+
+### Approach 4: Tangent balls and Merge steps into faces (`tangentBallSites`, `mergeSteps`)
+
+**Idea.** Instead of removing steps afterwards, change the generators so that steps nearly vanish, then keep the diagram's own vertices: no plane is ever intersected, so no vertex can fly off.
+
+**Any tangent ball keeps the own face.** Replace sample `a`'s sphere by a ball of radius `λ` tangent to `P_a` at `t_a` on either side. By §1.2 the own face is unchanged. A step between `a`'s ball and `b`'s tangent cell then lies at height
 
 ```
-π_ball(x) = |x − t_a|² − 2σλ f_a(x),     π_t(x) = |x − t_a|²,
+f_a(x) = (|x − t_a|² − |x − t_b|²) / (2λ_a)
 ```
 
-so by (1) of *Structure* their bisector is `P_a` for every `λ` and `σ`, and the own face is still `P_a ∩ C_a`. The sample spheres at sphere scale `s` are the special case `λ = s|d_a|`, `σ = sign d_a`. The power contour is still the boundary of `{F > 0}`, where `F(x) = f_{a(x)}(x)` and `a(x)` is the super cell containing `x`: own faces where `F` crosses 0 inside a super cell, steps on the walls where `F` jumps across 0. So the tangent sites are still wanted: they split each owner's region along its plane.
+above `P_a`: steps flatten onto the planes like `1/λ`. But a ball may not contain another tangent point (it would steal that point's cell), so `λ_a` is bounded by the largest empty ball tangent at `t_a` on that side, a discrete medial ball computed from the tangent points alone (cf. the power crust's poles). Put each ball on the side with the larger empty ball, radius `min(cap, ρ r_a)` (`ρ = 0.5`, cap 100). On convex, concave, flat and developable parts the balls are huge and the steps nearly vanish; on saddles both empty balls are `≤ 1/κ` and steps stay `O(κh²)`.
 
-**2. No choice of balls puts `P_a ∩ P_b` in the walls.** On `P_a`, `f_a = 0`, so every site tangent at `t_a` has power `|x − t_a|²` there (plus a constant per owner if weights are shifted). On the line `L = P_a ∩ P_b` both owners therefore compare `|x − t_a|²` with `|x − t_b|² + const`: the difference is linear along `L` with slope `2 (t_b − t_a)·e`, `e` the direction of `L`. It vanishes at one point unless `t_b − t_a ⊥ e`. So radii, centers along the normals and additive weights can only move the single point where the wall crosses `L`; they cannot make the wall contain `L` (except in the sphere's degeneracy). Exact containment would need moving each tangent site within its plane, to a "virtual tangent point" `q_a ∈ P_a`: 3 unknowns per owner (2 for `q_a`, 1 weight) against 2 conditions per neighbor pair (slope and offset along `L`), about 6 pairs per owner. That is overdetermined two to one, solvable only in special cases (on a sphere `q = t`; on a cylinder all `q` at one height, which gives the envelope's strips).
+**No generator gets the planes exactly.** On `L = P_a ∩ P_b`, any site tangent at `t_a` has power `|x − t_a|²` (plus a constant), so the wall between `a` and `b` meets `L` at a single point, whatever radii, sides or weights are chosen. Exact containment would require moving the tangent sites within their planes ("virtual tangent points"), which is overdetermined two to one. Some post-processing is always needed.
 
-**3. What the radius does.** Since containment is impossible, the next best is to make the steps flat. A step between `a`'s ball and `b`'s tangent cell lies where `π_ball,a = π_t,b`:
+**Merging.** Give each step to the owner whose plane it is nearer, clean up as in Approach 1, and output each region's boundary with *all* its vertices at their contour positions. Watertight and with no far vertices, but faces are planar only up to the merged step heights, and there are 2–6 times as many vertices. Options: *Snap* (pull vertices toward their planes) or *gap faces* (exactly planar faces, plus faces filling the gaps).
 
-```
-f_a(x) = (|x − t_a|² − |x − t_b|²) / (2λ_a).
-```
-
-It lies at height `D/(2λ_a)` above `P_a`, where `D = |x − t_a|² − |x − t_b|²` is of order spacing × distance. So steps flatten onto `P_a` like `1/λ` (checked: the identity holds to `2·10⁻⁹` at every step vertex). As `λ → ∞` with every ball outside, the `+` region is owned by `argmax f_a`, and the contour tends to the boundary of the convex envelope `∩ {f_a ≤ 0}`; with every ball inside, to the concave one.
-
-**4. Balls must be empty.** A ball that contains another tangent point `t_c` gives `π_a(t_c) < 0 = π_c(t_c)`: `a`'s cell takes `t_c`'s place, and `c`'s face loses its tangent point. So `λ_a` is bounded by the radius of the largest ball tangent at `t_a` on side `σ` that contains no other tangent point,
-
-```
-r_a^± = min over b with ±f_a(t_b) > 0 of |t_b − t_a|² / (2 |f_a(t_b)|),
-```
-
-the discrete version of the medial ball on that side (the *poles* of the power crust of Amenta, Choi and Kolluri (2001) are the largest empty balls through a sample; here the ball is tangent at `t_a`, so it can be computed from the tangent points alone). On the side away from which the surface curves (the convex side), `r` is the distance to the medial axis on that side, which locally is unbounded (a flat or convex region) and is limited only by other parts of the shape. On the side toward which it curves, `r ≤ 1/κ`.
-
-**5. The construction.** Put each ball on the side with the larger empty ball, with radius `λ_a = min(cap, ρ r_a)` (`ρ = 0.5`, `cap = 100` by default; `ρ < 1` keeps other tangent points strictly outside). The sample's sign is not used: only `t_a` and `n_a`. Then:
-
-- *convex and concave regions*: neighboring balls are all on the convex side and large, so the steps are flat: the contour is close to the local envelope;
-- *developable regions* (cylinders, cones): the flat direction does not limit `r`, so they behave like convex regions, and the envelope has long strip faces along the rulings;
-- *flat regions*: `r` is unbounded on both sides;
-- *saddles*: the surface curves toward both sides, `r^± ≤ 1/κ_{1,2}`, and the steps stay `O(κh²)`, as with small spheres. Nothing is gained there.
-
-This also says where the starting point (equal balls on the sample's side) goes wrong. Neighbors on opposite sides meet on a ball–ball wall `λ f_a + λ f_b = D/2`, which for large `λ` is the average plane between `P_a` and `P_b`: a power-crust face, not a tangent plane. And one radius for everything is either too small for the convex parts or too large for the concave ones: on the torus, `λ = 1` swallows every tangent point (no contour at all).
-
-**6. Extracting the surface.** Every contour face is now either an own face (exactly in its plane) or a step that lies close to one of its two owners' planes. *Merge steps into faces* gives each step to the owner whose plane it is nearer (the larger distance of its corners, minimized), cleans up the regions exactly as Contract contour regions does, and outputs each region's boundary with *all* its vertices at their contour positions. Every vertex is a vertex of the power diagram, so none is invented and none can fly off; the surface is watertight by construction. The price is that a face is planar only up to the heights of the steps merged into it. Two options trade this off:
-
-- *Snap*: move each vertex to `argmin Σ f_a(x)² + μ |x − v|²` over its regions' planes, `μ = 0.1` (vertices move by about the step height);
-- *Gap faces*: give every face its own copies of its corners, projected onto its plane, so it is exactly planar; then close the gaps between neighbors with a quad per shared edge and a polygon per vertex shared by three or more faces. Watertight, but the gaps are as wide as the steps.
-
-### Measurements
-
-Step heights on the convex outer half of the torus (1500 near-surface samples, median spacing to the nearest neighbor 0.037; steps whose centroid is more than 0.9 from the axis). "Voronoi" is `λ → 0`, every ball outside:
-
-| balls | median | 90% | max |
-|---|---|---|---|
-| Voronoi | `4.4·10⁻³` | `1.6·10⁻²` | `5.0·10⁻²` |
-| one radius, `λ = 0.01` | `1.4·10⁻³` | `5.1·10⁻³` | `1.5·10⁻²` |
-| one radius, `λ = 0.3` | `9.1·10⁻⁴` | `3.3·10⁻³` | `1.1·10⁻²` |
-| one radius, `λ = 1` | no contour: the balls on the inner half swallow every tangent point | | |
-| empty side, `ρ = 0.5`, cap 1 | `5.0·10⁻⁴` | `1.9·10⁻³` | `7.2·10⁻³` |
-| empty side, `ρ = 0.5`, cap 10 | `8.2·10⁻⁵` | `3.1·10⁻⁴` | `1.0·10⁻³` |
-| empty side, `ρ = 0.5`, cap 100 | `8.9·10⁻⁶` | `3.3·10⁻⁵` | `1.1·10⁻⁴` |
-
-On the convex half the empty-side balls reach the cap and the steps shrink exactly like `1/cap`, as (3) predicts. On the saddle half (inner) the steps stay at a median of `1.5·10⁻³` and a maximum of 0.030, the same as with sample spheres at `s = 0.1` (maximum 0.037). On the torus every ball goes outside (the outer empty ball is larger even on the saddle half); on the two spheres 361 of 1500 go inside, all within 0.23 of the crease plane `x = 0`; on the fandisk 138.
-
-Balls of one radius on the sample's side (torus, 1500 near-surface): at `λ = 0.1` the contour is 91% own faces, at `λ = 0.3` only 9%: almost all of it is then ball–ball walls between outside and inside balls. With the empty side, 68% of the contour's area is own faces and the rest are flat steps. Two balls per owner (inner and outer, both `ρ` × their empty radius, no tangent site; the power crust's pole pair, tangent at `t_a`) gave much the same: maximum contour error 0.011 against 0.016 on the torus, 0.086 against 0.103 on the fandisk.
-
-Least-squares weights: shifting both sites of each owner by `μ_a`, chosen so that each wall crosses `L_ab` at the point nearest the centroid of the current steps between `a` and `b` (three iterations), made things worse on the torus (1500 near-surface): the system is inconsistent (residual up to 0.14 with `|μ| ≤ 0.12`), 340 own faces disappeared, and the largest step grew from 0.030 to 0.036. As (2) shows, weights can only slide the crossing point; they cannot turn the wall.
-
-Comparison with the other methods, which use sample spheres at `s = 0.1`, exact `tau`, trust 2. Merge uses tangent balls (`ρ = 0.5`, cap 100). "Off" is vertices with `|sdf| > 0.02` out of all vertices (Merge keeps every region-boundary vertex, so it has 2–6 times as many); "off-plane" is the largest distance of a face's vertex from its tangent plane; "far" is vertices farther than twice the spacing (distance to the 6th nearest tangent point) from the tangent points of all their faces, with the largest ratio in parentheses:
-
-| | Contract contour regions | Triangulate step patches | Merge steps into faces |
-|---|---|---|---|
-| torus, 300 uniform | max 0.240, 173/600 off, area 9.44 | max 0.288, 137/690, area 9.00 | **max 0.091**, 207/1787, area 9.12, off-plane 0.18 |
-| torus, 1500 uniform | max 0.076, 64/3000, area 9.04 | max 0.055, 14/3620, area 9.03 | **max 0.041**, 33/8869, area 8.94, off-plane 0.11 |
-| torus, 1500 near surface | max 0.033, 24/3000 | max 0.035, 2/3458 | **max 0.016, 0**/8981, area 8.93, off-plane 0.030 |
-| two spheres, 1500 uniform | max 0.067, 27/2996 | max 0.163, 37/3010 | **max 0.039**, 50/3090, off-plane 0.081 |
-| two spheres, 1500 near surface | max 0.056, 8/2996 | max 0.127, 18/3038 | **max 0.013, 0**/3220, off-plane 0.025 |
-| box, 1500 uniform | **exact**, 0 hole edges | exact, 8 hole edges | max `3·10⁻⁴`, 17 hole edges (length ≤ `10⁻⁵`), far 55 (4.1×) |
-| box, 1500 near surface | max 0.042, 3/2996 | max 0.198, 11/2996 | **max `2·10⁻⁴`**, 0/3974, off-plane `1.5·10⁻⁴` |
-| cylinder, 1500 near surface | max 0.066, 7/2995, 3 hole edges | max 0.030, 2/3000 | **max 0.001, 0**/9949, 3 hole edges, far 213 (4.3×) |
-| cylinder, 300 near surface | max 0.105, 19/596 | max 0.078, 12/596 | **max 0.005, 0**/1903, far 53 (4.1×) |
-| fandisk, 300 near surface | max 0.508, 80/597, 7 hole edges | max 0.510, 99/886 | **max 0.158**, 244/1607, off-plane 0.23 |
-| fandisk, 1500 uniform | max 0.299, 131/2314 | max 0.307, 214/3346 | **max 0.135**, 344/6451, 28 hole edges |
-| fandisk, 1500 near surface | max 0.101, 48/2998 | max 0.154, 82/4104 | **max 0.096**, 210/7376, off-plane 0.13 |
-| fandisk, 4000 near surface | max 0.085, 15/7996, 31 hole edges | max 0.128, 35/10195, 71 hole edges | **max 0.052**, 106/18892, 3 hole edges |
-
-True areas: torus 8.88, two spheres 6.91, box 6.64, cylinder 5.97 (Merge: 5.97–5.98). Merge's areas are within 3% of the true areas, like the others' (closer on the torus at 1500 samples and on the cylinder, farther on the two spheres and the 300-sample torus with uniform samples). Its far counts are 0–7 on the torus, the two spheres and the near-surface fandisk (39 on the uniform fandisk), 55 on the uniform box and 171–213 on the cylinder, where faces become strips along the rulings (below); the other methods' are 0–16. On the box with uniform samples Merge is not exact (`3·10⁻⁴`), where the plane intersections of Approaches 1 and 3 are.
-
-Snap and gap faces (same runs):
-
-| | Merge | + Snap | + gap faces |
-|---|---|---|---|
-| torus, 1500 near surface | max 0.016, off-plane 0.030 | max 0.014, off-plane 0.017 | max 0.020, exactly planar, gaps up to 0.033 (area 9.14) |
-| torus, 1500 uniform | max 0.041, off-plane 0.11 | max 0.075, off-plane 0.031 | max 0.073, gaps up to 0.14 |
-| fandisk, 1500 near surface | max 0.096, 210 off, off-plane 0.13 | max 0.087, 41 off, off-plane 0.059 | max 0.101, gaps up to 0.13 |
-| cylinder, 1500 near surface | max 0.001, off-plane 0.045 | max 0.003, off-plane 0.004 | max 0.016, gaps up to 0.045 |
-
-Snap halves the off-plane distance at the cost of a slightly larger worst error on some shapes. Gap faces make the tangent-plane faces exactly planar, but the gaps have the size of the steps, and they add area (the torus's 8.93 becomes 9.14) and vertices (about 2.3 times). The median gap is tiny (`3·10⁻⁵` on the near-surface torus); the large ones are on saddles and at features.
-
-Runtime, 1500 samples: the empty radii take 20–30 ms (`O(n²)`), the power diagram 2.2–5.1 s (against 2.2–3.4 s with sample spheres: big balls make the clipping order less effective), merging 50–190 ms.
-
-**Developable surfaces.** On the cylinder the faces are strips along the rulings, up to 4.3 spacings long, as the envelope predicts, and every vertex is within 0.001 of the surface (against 0.030 for Triangulate step patches, which needs to intersect nearly dependent planes). There are no far vertices in the sense of Approaches 1–3: the strips' vertices are cell vertices on the surface. The strips are ragged rather than straight, since each strip is assembled from steps of different heights, and they end after a few spacings rather than spanning the cylinder. Collapse and flip (Approach 5) tries to reach the same structure by flipping the dual triangulation of Approach 3, and gets strips only next to the caps.
-
-| cylinder: Triangulate step patches | cylinder: Merge steps into faces |
-|---|---|
-| ![The capped cylinder recovered by Triangulate step patches: isotropic faces.](figures/cylinder-patches.png) | ![The capped cylinder recovered by Merge steps into faces with tangent balls: long strip faces along the rulings.](figures/cylinder-merge.png) |
-
-*Capped cylinder, 1500 near-surface samples. Left: Triangulate step patches; faces are isotropic, like the Voronoi cells of the tangent points. Right: Merge steps into faces with tangent balls; faces on the side are strips along the rulings, as in the envelope of the tangent planes.*
-
-**The fandisk** improves less: 0.096 against 0.101 and 0.154 at 1500 near-surface samples, 0.052 against 0.085 and 0.128 at 4000. The reason is the ball radii: a quarter of the owners have `λ < 0.18` and a tenth `λ < 0.09`, about the spacing (0.10), because the model has many features close together (a convex edge next to a concave one bounds the balls on both sides of the face between them). 88% of the vertices off by more than 0.02 have an owner whose ball is smaller than its spacing, against 20% of the others, and 32% have owners on opposite sides (against 9%). With `λ < h`, the steps `D/(2λ)` are as large as with small spheres. More samples help (4000 samples) because the radii are set by the shape while the spacing shrinks.
-
-| fandisk: Triangulate step patches | fandisk: Merge steps into faces |
-|---|---|
-| ![The fandisk recovered by Triangulate step patches: chamfers (orange) and spikes near the features.](figures/fandisk-patches.png) | ![The fandisk recovered by Merge steps into faces with tangent balls: no spikes, rough near the concave features.](figures/fandisk-merge.png) |
-
-*Fandisk, 1500 near-surface samples. Left: Triangulate step patches, with 553 chamfers (orange) and spikes where nearly dependent planes meet. Right: Merge steps into faces; no spikes, but the regions near the concave features, where the balls are small, are rough.*
-
-| torus | two spheres | box (near surface) |
-|---|---|---|
-| ![Torus recovered by Merge steps into faces.](figures/torus-merge.png) | ![Two spheres recovered by Merge steps into faces.](figures/twospheres-merge.png) | ![Box recovered by Merge steps into faces: flat sides, sharp edges.](figures/box-merge.png) |
-
-*Merge steps into faces with tangent balls, 1500 samples (uniform for the torus and the two spheres, as in the other screenshots; near-surface for the box). The faces near the torus's inner equator (a saddle) are visibly non-planar.*
+**Anisotropy for free.** On a cylinder, the faces become strips along the rulings, the envelope's structure, which no other method builds. The strips are ragged and end after a few spacings because each is assembled from steps of different heights.
 
 ![The torus contour with tangent balls, sliced at z = 0, colored by face type.](figures/torus-balls-contour.png)
 
-*The contour with tangent balls, torus, 300 samples, sliced at `z = 0` (compare the sample spheres in* Structure*): own faces (green) and steps (purple, here between a ball and another owner's tangent point). On the outer half the steps lie nearly in the planes of the own faces next to them; on the inner (saddle) half they are visible.*
+*Torus, 300 samples, tangent balls: on the outer (convex) half the steps lie almost in the planes of the own faces next to them; on the inner (saddle) half they are visible.*
 
-![2D: the contour with sample spheres at s = 0.1, with balls of radius 0.3 on the sample's side, and with balls on the empty side.](figures/fig-balls.svg)
+![2D: the contour with sample spheres at s = 0.1, with balls on the sample's side, and with balls on the empty side.](figures/fig-balls.svg)
 
-*2D, the same 70 samples as above. In 2D the steps on smooth parts are already tiny (median `3·10⁻⁵`), so the balls change little there (median `3·10⁻⁶` on the empty side). The steps that remain are at the concave creases, where the tangent points are 0.15 or more from the crease and the inner balls are small, so `D/(2λ)` is large: the largest step is 0.144 with sample spheres and with empty-side balls, and 0.099 with balls on the sample's side.*
+### Approach 5: Collapse and flip (`triangulatePatches`, option `rank`)
 
-### Hole edges
+**Idea.** Keep Approach 3's dual triangulation but repair it with tests that use only the planes, before placing any vertex.
 
-The contour of the tangent-ball diagram has a few hole edges on the box (17 at 1500 uniform samples), the cylinder (18) and the fandisk (28), all at points where several tangent points coincide (box and cylinder edges and corners, mesh vertices of the fandisk: 394 of 1500 tangent points on the box coincide with another one). They are slivers of length `≤ 10⁻⁵` (one of 0.017 on the box with cap 10): faces of near-zero area that one cell keeps and its neighbor drops (`computePowerDiagram` drops faces of area `< 10⁻¹²`). With near-surface samples there are none on the box and 3 on the cylinder.
+1. **Collapse** dual edges whose two planes coincide (normals and offsets equal to `10⁻⁷`), when the link condition holds. A facet may then own several tangent points: the box's flat sides become a few faces. Its trust radius uses the nearest of them.
+2. **Envelope flips without triple points.** Write planes as `h_a = (n_a, −n_a · t_a)`. Then `f_d(x_abc) = D4(a,b,c,d) / D3(a,b,c)`, with `D4 = det[h_a; h_b; h_c; h_d]` and `D3 = det[n_a; n_b; n_c]`. In an all-convex or all-concave quad, edge `ac` is on the envelope iff `κ σ D4(a,b,c,d) ≥ 0` (`κ = ∓1` for convex/concave, `σ` the orientation of the Gauss image). This is an in-sphere test in plane coordinates: it needs no triple point and holds when `x_abc` is at infinity. Four strip planes of a cylinder have `D4 = 0`, a tie.
+3. **Mixed-quad flips.** In quads with both edge types, flip when it lowers a cost of *far vertices* (beyond the trust radius) and *inverted edges*: each dual edge `p–q` puts its two vertices on the line `P_p ∩ P_q`, and walking around face `p` the edge must run along `±(n_p × n_q)` according to its type; a negative signed length is a fold. In an all-convex quad this inversion test is the envelope test, so this generalizes it to mixed edges. Each flip lowers the total cost, so it terminates.
 
-### Open problems in this approach
+**Limits.** On a cylinder every quad of four strips is a tie, so local flips grow strips only one or two rows from the caps; a ladder of strips would need a direct construction. Naive alternatives failed: flipping to maximize `|det|` gives planes that meet, but as non-neighbors (cylinder: 0.012 → 0.251), and applying the far-plus-inversion cost to tie quads destroys the cylinder.
 
-- **Saddles.** By (2), no generators of this kind put `P_a ∩ P_b` in the walls, and on saddles the empty balls are small on both sides, so the steps stay `O(κh²)` (torus inner half: up to 0.030 at 1500 near-surface samples). Moving the tangent sites within their planes ("virtual tangent points") is the only freedom left; the conditions are overdetermined two to one, but a least-squares solution might still help on saddles.
-- **Features closer than the spacing** (the fandisk): the ball radii fall below the spacing and the steps are large. Two balls per owner did not change this. The empty radius uses only the tangent points; the samples' empty spheres `B(p, |d|)` are not used yet.
-- **Planarity.** Faces are planar only up to the step heights (0.03 on the near-surface torus, 0.13 on the fandisk). Gap faces make them planar but expose the gaps.
-- **Vertex count.** Merge keeps every vertex of the region boundaries, 2–6 times as many as the other methods. Most have only two regions; dropping nearly collinear ones would simplify the faces.
-- **Strips.** On the cylinder the strips end after about 4 spacings and are ragged; a straighter, longer strip would need the step heights to vanish, i.e. a larger cap or a better labeling of steps.
+### Clip tangent planes (`clipTangentPlanes`)
 
-Reference: N. Amenta, S. Choi and R. K. Kolluri, The power crust, *Proc. ACM Symposium on Solid Modeling and Applications*, 2001.
+An earlier method that uses only `t`, `n` and signs: neighbors come from a diagram of mirrored pairs `t ± δn`, and each tangent plane is clipped by its neighbors' half-spaces (unions across concave creases). Every face is exactly planar and contains its tangent point, but faces share no vertices: the result is a polygon soup, with gaps, overlaps and, on the fandisk, large spurious faces. It shows the opposite trade-off from Approach 4: perfect facets, no shared edges.
 
-## Approach 5: Collapse and flip (`triangulatePatches`, option `rank`)
+## 3. Comparison
 
-Triangulate step patches (Approach 3) builds a dual triangulation: one vertex per own face, one triangle `(a, b, c)` per output vertex `P_a ∩ P_b ∩ P_c`. On developable surfaces (planes, cylinders, cones) the normals around a face span only one or two directions, so many triangles have dependent planes. Their triple point is far away or does not exist, and the trust region and chamfers (step 8 of Approach 3) hide the problem. Collapse and flip post-processes that triangulation in three steps, before the vertices are placed:
+All runs: seed 1, `s = 0.1`, exact `tau`, trust 2; Approach 4 uses tangent balls (`ρ = 0.5`, cap 100), the others sample spheres. "Near-surface" samples have `|d| < 0.1`; "uniform" fill the domain `[−1.5, 1.5]³`.
 
-1. **Collapse** dual edges whose two planes coincide.
-2. **Envelope flips** (Lawson) in quads whose four edges are all convex or all concave, with a test that needs no triple point.
-3. **Mixed-quad flips** in quads with both convex and concave edges, lowering a cost made of far vertices and inverted edges.
+### 3.1 Visual
 
-Vertices and faces are then built exactly as in Approach 3 (exact intersection, chamfer beyond the trust radius, faces as the duals). Option `rank` of `triangulatePatches`: `true` runs all three steps, `'collapse'` and `'lawson'` stop after the first one or two. In the viewer it is the method *Collapse and flip*, with the same controls as Triangulate step patches. It adds no parameters: it uses `tau` and the trust radius, and fixed tolerances (planes are the same below `10⁻⁷`; a tie is `|D4| ≤ 10⁻⁹` × the quad's size; a mixed flip must gain `10⁻⁶` × its size).
+![Five shapes (rows) by the power contour with sample spheres and with tangent balls, and the five recovery methods (columns).](figures/comparison.png)
 
-### Dependent triangles
+*1500 near-surface samples. Columns 1–2: the raw contour, green own faces and purple steps. Columns 3–7: recovered surfaces; red edges are hole edges, orange faces chamfers. The individual shots are `figures/cmp-<shape>-<method>.png`.*
 
-Fraction of dual triangles whose three normals are exactly dependent (`|det(n_a, n_b, n_c)| < 10⁻⁹`) / nearly dependent (`< 10⁻³`), 1500 samples, `s = 0.1`, before and after Collapse and flip:
+What to look for:
 
-| | Triangulate step patches | Collapse and flip |
-|---|---|---|
-| torus | 0 / 394 of 3000 | 0 / 327 of 3000 |
-| two spheres | 0 / 167 of 2996 | 0 / 167 of 2996 |
-| box | 2039 / 4 of 2347 | 1171 / 4 of 1479 |
-| box, near surface | 2941 / 0 of 2996 | 283 / 0 of 338 |
-| cylinder, near surface | 2732 / 0 of 2996 | 1877 / 9 of 2258 |
-| fandisk | 587 / 515 of 2390 | 208 / 484 of 2082 |
-| fandisk, near surface | 1137 / 1030 of 2998 | 72 / 934 of 1966 |
-| fandisk, 4000 near surface | 3470 / 3097 of 7963 | 306 / 2991 of 4903 |
+- **The raw contour** with sample spheres has spikes wherever steps reach far (box, cylinder, fandisk). With tangent balls it is already close to the surface everywhere; its purple steps are thin slivers.
+- **Contract** and **Triangulate** look alike: isotropic, Voronoi-like faces everywhere, including on the flat box sides and the cylinder. Triangulate's spike under the box is a far corner vertex.
+- **Extend** shows its red cracks along the box and cylinder edges and around the fandisk.
+- **Merge** is the only method with long strips on the cylinder side; its box is clean, but its faces, although many, are not quite planar.
+- **Collapse and flip** is the only method whose facets are as large as the data allows: the box has a handful of faces, the cylinder's cap two, the fandisk's flat top one. Its cylinder side remains isotropic.
 
-The collapse removes most exactly dependent triangles (two identical planes). The nearly dependent ones mostly remain; see *Where the errors are* below for why that matters less than expected.
+### 3.2 Numerical
 
-### 1. Collapse
+**Accuracy**: largest distance of a vertex from the true surface / number of vertices farther than 0.02. 1500 near-surface samples:
 
-Two own faces with the same plane are one face: an edge between them carries no information. A dual edge `a–b` whose planes coincide (normals and offsets equal to `10⁻⁷`) is collapsed, merging `b` into `a`, when the link condition holds (the common neighbors of `a` and `b` are exactly the two vertices opposite the edge), so the triangulation stays a manifold. The merged face keeps all its tangent points. This matters for the trust radius: the radius of a vertex is the trust factor times the distance from its anchor to the farthest of its faces' tangent points, and a merged face must use its *nearest* tangent point there. A first prototype used the representative's own tangent point, which can be far across a big merged face; trust radii became huge and far intersections were accepted (fandisk, 1500 near-surface samples: max error 0.154 → 1.047 from the collapse alone). With the nearest tangent point, collapsing alone gives max 0.154, 79 off (82 before), and makes the near-surface box exact (max 0.198, 11 off before).
-
-The link condition stops some merges: on the cylinder's flat cap two faces remain, and the box keeps 1171 exactly dependent triangles (coplanar pairs whose collapse would make a non-manifold edge). Those are harmless: `qefTruncated` drops the dependent direction exactly.
-
-### 2. The envelope test without triple points
-
-Write each plane as a vector `h_a = (n_a, −n_a·t_a)`, so `f_a(x) = h_a · (x, 1)`. The triple point of `(a, b, c)` is the `X` with `h · X = det[h_a; h_b; h_c; h]` for every `h`, and its last coordinate is `D3(a,b,c) = det[n_a; n_b; n_c]`. Hence
-
-```
-f_d(x_abc) = D4(a,b,c,d) / D3(a,b,c),     D4 = det[h_a; h_b; h_c; h_d]
-```
-
-(checked numerically to `2·10⁻¹⁵`). Approach 3's envelope test for an edge `ac` between triangles `(a, b, c)` and `(a, c, d)` asks whether plane `d` is on the envelope's side of `x_abc` (convex: `f_d ≤ 0`; concave: `f_d ≥ 0`). Where the Gauss map keeps orientation (`K > 0`, convex or concave), `D3` of every consistently oriented triangle has the same sign `σ` (measured as the sign of `Σ D3` over all triangles). So the edge is on the envelope iff
-
-```
-κ σ D4(a,b,c,d) ≥ 0,     κ = −1 (convex), +1 (concave).
-```
-
-This is the in-sphere test of the lifted dual points, written in the planes. It has three useful properties:
-
-- It needs no triple point, so it holds when `x_abc` is at infinity (`D3 = 0`, the strips of a cylinder).
-- It is symmetric: `D4(a,c,d,b) = D4(a,b,c,d)`, so testing `x_acd` against `b` gives the same answer. A flip to `(a, b, d), (b, c, d)` negates `D4` (an odd permutation), so exactly one diagonal passes unless `D4 = 0`.
-- Four planes whose normals are coplanar (all ⊥ to a cylinder's axis) have `D4 = 0`: a tie. The test cannot choose, and no flip happens.
-
-A quad is flipped when its four edges are all convex or all concave (edge types read from the tangent points, as in Approach 3: `f_a(t_b) + f_b(t_a) < 0` is convex), the test fails by more than the tie tolerance, `bd` is not already an edge, and both new triangles keep the orientation (`σ D3 > 0`: the quad is convex in the Gauss image). A strip triangle with `D3 = 0` can be flipped away, never created. Flips are queued Lawson-style (the four outer edges of a flipped quad are re-tested).
-
-### 3. Mixed quads
-
-Where convex and concave edges meet (features of mixed type, saddles), there is no envelope; Approach 3 reads such loops as lattice (max–min) polyhedra. The envelope test is not used there. Instead each quad gets a cost, and an edge is flipped when that lowers it:
-
-- **Far vertices:** for each of the quad's two triangles, how far its exact triple point is beyond the trust radius of its anchor (capped at the radius; the full radius if the three planes have no common point).
-- **Inverted edges:** for each of the quad's five edges `p–q` (the diagonal and the four outer edges, each measured against the triangle across it), the two triangles on the edge put their vertices on the line `P_p ∩ P_q`, at `x_0 + λu`, `u = n_p × n_q`, `λ = −f_r(x_0) / (n_r · u)` for the third face `r`. Walking around face `p` counterclockwise from outside, the edge with `q` goes along `+u` if `p–q` is convex and along `−u` if concave (times `σ`). A negative signed length is an inverted edge, a fold; its cost is that length, capped at `trust × |t_p − t_q|`. Parallel planes have no edge at all and cost the cap.
-
-In an all-convex quad the inversion of the diagonal is exactly the envelope test (a non-regular diagonal has negative length), so this is its generalization to mixed edge types, with the edge types again from the tangent points. Only the quad's terms change when it is flipped, so every flip lowers the total cost over the whole triangulation and the flips end. The step between two parallel planes on the fandisk (a top face, a vertical wall and a lower face parallel to the top, 0.2 below) is the typical case: Approach 3 can make the two parallel faces adjacent, an edge with no line, which this cost removes.
-
-### What failed
-
-All on top of the collapse, measured in the same runs as the table below (variants in commit `84f4870`).
-
-| | torus | cylinder | cylinder, near surface | fandisk, near surface | fandisk, 4000 near surface |
+| | torus | two spheres | box | cylinder | fandisk |
 |---|---|---|---|---|---|
-| Triangulate step patches | 0.055, 14 off | 0.012, 0 off | 0.030, 2 off | 0.154, 82 off | 0.128, 35 off |
-| collapse only | 0.055, 14 | 0.012, 0 | 0.030, 2 | 0.154, 79 | 0.128, 33 |
-| naive: raise min \|det\| | 0.055, 17 | 0.251, 72 | 0.112, 41 | 0.143, 109 | 0.214, 132 |
-| envelope flips only (`'lawson'`) | 0.026, 7 | 0.012, 0 | 0.006, 0 | 0.154, 67 | 0.128, 26 |
-| far + inversion cost on all quads | 0.025, 5 | 1.179, 625 (area 4.44) | 0.875, 208 | 0.129, 54 | 0.157, 47 |
-| **Collapse and flip** (envelope + mixed) | **0.025, 5** | **0.012, 0** | **0.006, 0** | 0.173, **40** | **0.084, 14** |
+| power contour, `s = 0.1` | 0.023 | 0.448 | 1.000 | 1.053 | 0.675 |
+| power contour, tangent balls | 0.016 | 0.013 | `2·10⁻⁴` | 0.001 | 0.103 |
+| 1. Contract contour regions | 0.033 / 24 | 0.056 / 8 | 0.042 / 3 | 0.066 / 7 | 0.101 / 48 |
+| 2. Extend own faces | 0.033 / 24 | 0.067 / 6 | 0.042 / 3 | 0.065 / 7 | 0.579 / 80 |
+| 3. Triangulate step patches | 0.035 / 2 | 0.127 / 18 | 0.198 / 11 | 0.030 / 2 | 0.154 / 82 |
+| 4. Merge steps (tangent balls) | **0.016 / 0** | **0.013 / 0** | `2·10⁻⁴` / 0 | **0.001 / 0** | **0.096** / 210 |
+| 5. Collapse and flip | 0.028 / 1 | 0.061 / 8 | **exact / 0** | 0.006 / 0 | 0.173 / **40** |
+| Clip tangent planes | 0.190 / 206 | 0.405 / 139 | 0.156 / 15 | 0.099 / 41 | 1.392 / 1731 |
 
-- **Naive flips** (flip a quad when it raises the smaller `|det|` of its two triangles, as in the first prototype) reduce dependent triangles (fandisk near: 1135 → 844 after the collapse) but put more vertices off the surface everywhere. Independent normals are necessary but not sufficient: the new triple point exists, but it is the intersection of planes that are not neighbors in the planes' arrangement (on the cylinder, two strips that are not angular neighbors plus a cap). In the first prototype this was hidden behind the collapse's trust-radius bug (max 1.047).
-- **The cost on every quad** (not just mixed ones) is good on smooth shapes and on the fandisk at 1500, but destroys the cylinder: in tie quads (four strips, `D4 = 0`) every triangle is "far" (three parallel lines have no common point), and the cost happily replaces them with triangles whose planes do meet, but at the wrong place: the same failure as the naive flips. Restricting the cost to mixed quads and leaving ties alone fixes this.
-- **Flipping bad triangles** (a triangle beyond the trust radius flips an edge when both new triangles are within it, after the envelope flips) changed little where it helped and made the uniform fandisk worse (max 0.307 → 0.524); dropped.
+Same, 1500 uniform samples (the far samples' big spheres make wider steps):
 
-### Results
-
-1500 samples unless noted, seed 1, `s = 0.1`, exact `tau`, trust 2; "off" counts vertices with `|sdf| > 0.02`, "holes" are directed polygon edges without a reversed twin, "off-plane" is the largest distance from a face's vertex to its own tangent plane. Merge steps into faces (Approach 4, tangent balls) is quoted from its table: same samples, but different sites, and 2–6 times as many vertices.
-
-| | Contract contour regions | Triangulate step patches | **Collapse and flip** | Merge steps into faces |
-|---|---|---|---|---|
-| torus | 0.076, 64 off | 0.055, 14 off, 310 chamfers | **0.025, 5 off**, 66 chamfers | 0.041, 33 off |
-| torus, near surface | 0.033, 24 off | 0.035, 2 off, 229 chamfers | 0.028, 1 off, 44 chamfers | **0.016, 0 off** |
-| two spheres | 0.067, 27 off | 0.163, 37 off | 0.116, 38 off | **0.039**, 50 off |
-| two spheres, near surface | 0.056, 8 off | 0.127, 18 off, off-plane 0.01 | 0.061, 8 off, off-plane `3·10⁻¹⁴` | **0.013, 0 off** |
-| box | exact, 0 holes | exact, 8 holes (length 0) | exact, 8 holes (length 0) | `3·10⁻⁴`, 17 holes |
-| box, near surface | 0.042, 3 off | 0.198, 11 off | **exact**, 154 faces | `2·10⁻⁴` |
-| cylinder | 0.022, 2 off | 0.012, 0 off | 0.012, 0 off | — |
-| cylinder, near surface | 0.066, 7 off, 3 holes | 0.030, 2 off | 0.006, 0 off | **0.001, 0 off**, 3 holes |
-| fandisk | 0.299, 131 off | 0.307, 214 off, 478 chamfers | 0.307, 101 off, 215 chamfers | **0.135**, 344 off |
-| fandisk, near surface | 0.101, 48 off | 0.154, 82 off, 553 chamfers | 0.173, 40 off, 206 chamfers | **0.096**, 210 off |
-| fandisk, 4000 near surface | 0.085, 15 off, 31 holes | 0.128, 35 off, 71 holes | 0.084, 14 off, 68 holes | **0.052**, 106 off, 3 holes |
-| torus, 300 | 0.240, 173 off | 0.288, 137 off | 0.173, 94 off | **0.091** |
-| torus, `s = 1` | 0.076, 65 off | 0.126, 38 off | **0.036, 8 off** | — |
-| cylinder, 300 | **0.068**, 31 off | 0.739, 40 off | 0.261, 15 off | — |
-| fandisk, near surface, `s = 1` | **0.091**, 39 off | 0.207, 67 off | 0.129, 25 off | — |
-
-Areas are within 0.1 of Triangulate step patches everywhere (true: torus 8.88, two spheres 6.91, box 6.64, cylinder 5.97, fandisk 8.82; Collapse and flip: 9.03, 6.92, 6.64, 5.98, 8.85). Hole edges are those of Triangulate step patches (they come from its partitioned patches): 0 except on the box (8, of length 0) and the 4000-sample fandisk (68). Faces stay exactly planar wherever Approach 3's are (off-plane `10⁻¹³`; 0.07–0.1 on the fandisk, from pairs of nearly parallel planes whose line is beyond the trust radius). Flips: 515 envelope + 292 mixed on the torus, 210 + 0 on the near-surface cylinder, 311 + 645 on the near-surface fandisk; collapses: 1329 on the near-surface box, 369 on the cylinder, 516 on the fandisk. Runtime is within 40% of Triangulate step patches (fandisk, 4000: 0.73 s against 0.77 s, power diagram excluded). Triangulate step patches gives identical numbers with the option off.
-
-So among the plane-intersection methods (Approaches 1 and 3) Collapse and flip has the fewest vertices off, or as few, on every case except the uniform two spheres (38 against 27), removes most chamfers, and makes the near-surface box exact. Its worst vertex is worse than Contract contour regions' on the fandisk at 1500 samples (0.173 against 0.101) and on the sparse cylinder. Merge steps into faces (Approach 4) is more accurate on most shapes, but its faces are planar only up to the step heights and it keeps every contour vertex; it is not exact on the box.
-
-| torus | cylinder, near surface | fandisk, near surface |
-|---|---|---|
-| ![Torus recovered by Collapse and flip.](figures/torus-collapse.png) | ![Capped cylinder recovered by Collapse and flip: the cap is merged into two faces, strips hang from the rim, the side is still isotropic.](figures/cylinder-collapse.png) | ![Fandisk recovered by Collapse and flip: flat faces merged, strips along the concave fillets.](figures/fandisk-collapse.png) |
-
-*Collapse and flip, 1500 samples (compare `torus-patches.png`, `cylinder-patches.png`, `fandisk-patches.png` in Approaches 3 and 4, and Contract contour regions on the fandisk below). Torus: same look as Triangulate step patches, with fewer chamfers; the jagged region on the inner top circle (`K = 0`) remains. Cylinder: the cap collapses into two faces (the link condition stops the last merge), and envelope flips hang long strips from the rim, but only one or two rows deep: the side stays isotropic. Fandisk: the large flat faces collapse into single faces, and the faces on the cylindrical fillets become strips along the rulings; artifacts remain near the features at the right.*
-
-![Fandisk recovered by Contract contour regions.](figures/fandisk-regions.png)
-
-*Contract contour regions on the same fandisk samples, for comparison: isotropic faces everywhere, also on flat parts.*
-
-### Where the errors are
-
-Dependent triangles are not where most errors are. Fandisk, 1500 near-surface samples, dual triangles by `|D3|`, counting a triangle as off if any of its points is off by more than 0.02:
-
-| | Triangulate step patches: exact vertex | chamfered | Collapse and flip: exact vertex | chamfered |
-|---|---|---|---|---|
-| `|D3| < 10⁻⁹` | 1133, 3 off | 4, 0 off | 72, 0 off | — |
-| `10⁻⁹ ≤ |D3| < 10⁻³` | 615, 9 off | 415, 13 off | 779, 9 off | 155, 5 off |
-| `10⁻³ ≤ |D3| < 10⁻²` | 248, 8 off | 93, 4 off | 324, 5 off | 33, 1 off |
-| `|D3| ≥ 10⁻²` | 449, 14 off | 41, 18 off | 585, 13 off | 18, 5 off |
-
-Nearly dependent triangles are off 1–3% of the time; chamfered *independent* triangles 28–44%: those are wrong combinatorics (planes that meet, but not as neighbors), mostly at features. The dependence mostly produces chamfers (clutter) rather than errors, because `qefTruncated` and the trust radius already handle it.
-
-Why the remaining bad triangles (exact vertex beyond the trust radius, or no common point) are not flipped, after the envelope flips, by the reason at each of their three edges: on the exact cylinder (1500 uniform) 952 of 1160 have three tie quads (`D4 = 0`, four strips); on the near-surface cylinder 1623 of 1875. On the near-surface fandisk most are in mixed quads (131 of 471 at all three edges), which step 3 then handles. On the torus they are split between mixed quads and quads whose flip would reverse the Gauss-image orientation (saddles).
-
-### Open problems in this approach
-
-- **Strips through developable regions.** In a cylinder the true faces are strips along the rulings, ending where they meet a plane with an independent normal (a cap, a crease). The dual of that is a ladder: each strip `s_i` is adjacent to `s_{i−1}`, `s_{i+1}` and the faces at both ends. Local flips cannot get there: every quad of four strips is a tie, so flips only reach one or two rows from the cap (visible in the cylinder figure). A direct construction is needed: find the cluster of faces whose normals are ⊥ a common direction `d`, order them by angle about `d`, remove the triangles among them and their ring, and stitch the angular chain to the boundary loops at both ends (two Fuchs–Kedem–Uselton stitchings, as in Approach 3's two-loop patches, with the envelope cost). On the exact cylinder this would make the side faces exactly planar (off-plane 0.005 now, from the least-squares points of three parallel lines); the vertex errors are already small (max 0.006). Approach 4's tangent balls get the strips from the diagram instead (ragged, about 4 spacings long).
-- **The trust radius is a weak test of "near the surface".** The worst fandisk vertex (0.173) is an exact intersection of independent planes, 0.32 from its anchor but within the radius (2 × 0.31). A stricter radius in the flip cost alone (trust 1 or 1.5) only moved the errors around (0.139 / 52 off and 0.129 / 43 off against 0.173 / 40 off). The samples' empty spheres `B(p, |d|)` are a data-only lower bound on the error: a vertex inside one is at least that deep off the surface. It catches 16 of the 67 off vertices on the near-surface fandisk after the envelope flips, with 2 false alarms in 2791 (at depth > 0.01), so it could join the cost.
-- **Edge types from tangent points** decide convex, concave and mixed quads, and the direction of every edge in the mixed cost. For two nearly parallel offset planes (a step) `f_a(t_b) + f_b(t_a) ≈ 0` and the type is noise; such edges are handled only because parallel planes cost the cap.
-- **The link condition** keeps some coplanar faces apart (two faces on the cylinder's cap). Merging them as one face with a hole or a pinch would need the face-walking of Approach 1's topology cases.
-- **Sparse samples** (cylinder, 300): 0.261 against 0.068 for Contract contour regions; the triangulation of Approach 3 is already poor there (0.739) and the flips only partly repair it.
-- **Saddles** keep their mixed quads; the mixed cost terminates but is a heuristic, as the decider of Approach 3 is.
-
-## Topology of the regions
-
-The contour is a closed 2-manifold, so the regions of Contract contour regions tile it, and contracting each region is well defined. Leaving a hole is never necessary. Each connected piece of a region is handled by its boundary cycles, taken in the region's tangent plane: the largest is the outer boundary, cycles of the same orientation are lobes pinched to it at a vertex, and cycles of the opposite orientation are holes.
-
-- *Split* (the region has several pieces): one face per piece, all in the same tangent plane.
-- *Pinched* (the boundary touches itself at a vertex): one weakly simple polygon that visits that vertex twice.
-- *Hole with only steps inside* (no own face): erased; the steps are given to the region.
-- *Hole with own faces inside* (an annulus): a face with a hole. The faces inside meet the annulus face at the junctions on the hole's boundary, so they attach to the annulus's tangent plane.
-- *Fewer than three junctions*: the piece has no corners of its own. Its one or two neighbors already share the edge between its junctions, so it collapses to that edge, which leaves no hole. (Merging it into a neighbor instead cascaded and made faces far larger than their tangent points' neighborhoods.)
-- *Two neighbors meeting along two arcs*: two edges between the same two faces, both on the line `P_a ∩ P_b`.
-
-The viewer triangulates faces by ear clipping in their plane, which handles non-convex, pinched and holed faces, and reports these cases under "topology" in the stats. Measured with `topo` in `recoverSurface`'s result (exact `tau`, trust 2, seed 1); "before" is the previous code, which dropped every non-disc region:
-
-| shape, sampling | n | s | hole edges before → now | max error | pinched / holes erased / collapsed / pairs sharing 2+ edges |
+| | torus | two spheres | box | cylinder | fandisk |
 |---|---|---|---|---|---|
-| torus, uniform | 1500 | 0.1 | 8 → 0 | 0.076 | 0 / 0 / 0 / 0 |
-| two spheres, uniform | 300 | 1 | 14 → 0 | 0.084 | 0 / 0 / 0 / 0 |
-| box, uniform | 300 | 1 | 18 → 0 | exact | 1 / 0 / 8 / 19 |
-| box, uniform | 1500 | 1 | 11 → 0 | exact | 1 / 8 / 6 / 4 |
-| box, uniform | 1500 | 0.1 | 14 → 0 | exact | 0 / 0 / 6 / 0 |
-| two spheres, near surface | 300 | 0.1 | 51 → 0 | 0.090 | 0 / 0 / 0 / 0 |
-| two spheres, near surface | 1500 | 0.1 | 20 → 0 | 0.056 | 0 / 0 / 0 / 0 |
+| power contour, `s = 0.1` | 0.083 | 0.379 | 0.106 | 0.101 | 0.251 |
+| power contour, tangent balls | 0.041 | 0.039 | `3·10⁻⁴` | 0.002 | 0.178 |
+| 1. Contract contour regions | 0.076 / 64 | 0.067 / **27** | **exact / 0** | 0.022 / 2 | 0.299 / 131 |
+| 2. Extend own faces | 0.076 / 51 | 0.179 / 30 | `3·10⁻⁵` / 0 | 0.023 / 1 | 0.326 / 118 |
+| 3. Triangulate step patches | 0.055 / 14 | 0.163 / 37 | exact / 0 | 0.012 / 0 | 0.307 / 214 |
+| 4. Merge steps (tangent balls) | 0.041 / 33 | **0.039** / 50 | `3·10⁻⁴` / 0 | **0.002 / 0** | **0.135** / 344 |
+| 5. Collapse and flip | **0.025 / 5** | 0.116 / 38 | exact / 0 | 0.012 / 0 | 0.307 / **101** |
+| Clip tangent planes | 0.273 / 276 | 0.370 / 135 | 0.190 / 57 | 0.374 / 235 | 1.182 / 2191 |
 
-All 20 runs (torus, two spheres and box; uniform and near-surface; 300 and 1500 samples; `s = 1` and `0.1`) now have 0 hole edges, with the same maximum error as before. Most of the old non-disc regions were not topological at all: welding merged two consecutive corners of a tiny contour face, and the resulting `u → u` boundary edge broke the boundary walk. With that fixed, the remaining cases are at the box's corners and edges. No annulus occurred in any run, so that path is untested on real data.
+**Structure**, 1500 near-surface samples: vertices; hole edges (directed edges with no reversed twin); off-plane (largest distance of a facet's vertex from its own tangent plane); area (true: torus 8.88, two spheres 6.91, box 6.64, cylinder 5.97, fandisk 8.82). The contour row gives its face count and the share of its area in own faces.
 
-### Contracting a patch of steps directly
-
-See *Approach 3* above: it removes each patch of steps by triangulating the loop of own faces around it. A ring-shaped patch of steps with own faces inside its hole has two loops, `a_1 … a_k` outside and `b_1 … b_m` inside; joining them is the classic problem of tiling between two contours (Fuchs, Kedem and Uselton 1977), where every triangle uses two consecutive faces of one loop and one of the other. Approach 3 currently keeps the partition's junctions for such patches (see *Patches the planes do not decide*).
-
-## Vertex placement (`qefTruncated`)
-
-A vertex shared by regions or faces `a, b, c, …` minimizes `Σ (n_k·x − n_k·t_k)²`. With exact tangent data there is no noise, so the minimizer is the exact intersection of the planes when they are independent. Writing `A = Σ n nᵀ` with eigenvalues `λ` and eigenvectors `u`, and `m` for the vertex's contour position, the solution is `m` plus one correction along each `u` (these corrections are orthogonal). Two rules decide which corrections to keep:
-
-- **Dependent planes** (`tau`, "Dependent planes, log₁₀"). Eigenvalues below `tau · λ_max` are dropped: there is no unique intersection in that direction (coplanar faces of the box: `A` has rank 1). This is only for exact degeneracies; `tau = 10⁻¹²` is numerical precision.
-- **Trust region** (`trust`, "Trust radius × spacing", default 2). A tangent plane is a first-order model of the surface, accurate only within about one sample spacing of its tangent point. So the vertex may move at most `ρ = trust × (distance from m to the farthest of its tangent points)`. Corrections are added from the best-determined direction (largest `λ`) down, keeping as many as stay within `ρ`: the exact intersection of the planes if it is near; otherwise the nearest point on the line where the two best-determined planes meet; otherwise a point on their average plane; otherwise `m`.
-
-### Why the torus vertices flew off
-
-With exact intersections and no trust region, vertices on the torus land up to 615 units away. This is not a numerical error. Solving the worst vertices independently with Cramer's rule:
-
-| distance off the surface | `det(n₁,n₂,n₃)` | residual on the three planes | moves under `10⁻⁹` normal noise | tangent points span | max normal angle |
+| | torus | two spheres | box | cylinder | fandisk |
 |---|---|---|---|---|---|
-| 615 | 5.6e-7 | 1.9e-12 | 0.42 | 0.098 | 12° |
-| 61 | 3.1e-5 | 9.4e-14 | 1.3e-3 | 0.174 | 23° |
-| 19.5 | 8.8e-6 | 4.3e-14 | 5.0e-4 | 0.083 | 10° |
-| 6.7 | 1.5e-4 | 7.4e-16 | 2.7e-5 | 0.145 | 19° |
+| contour, `s = 0.1`: faces, own area, area | 8964, 95%, 9.39 | 1748, 93%, 7.60 | 2613, 77%, 9.75 | 7233, 85%, 7.43 | 6213, 73%, 13.81 |
+| contour, tangent balls | 8508, 68%, 8.95 | 1772, 98%, 6.97 | 2643, 90%, 6.64 | 9577, 44%, 5.97 | 6130, 79%, 9.25 |
+| 1. Contract | 3000, 0, 0.013, 9.01 | 2996, 0, 0.011, 7.00 | 2996, 0, 0, 6.64 | 2995, 3, 0.006, 5.98 | 2998, 0, 0.092, 8.98 |
+| 2. Extend | 2964, 11, 0.015, 9.01 | 2990, 103, 0.012, 7.02 | 2933, 246, 0, 6.65 | 2938, 116, 0.006, 5.99 | 2944, 517, 0.148, 9.29 |
+| 3. Triangulate | 3458, 0, 0, 9.05 | 3038, 0, 0.012, 7.01 | 2996, 0, 0, 6.67 | 3000, 0, 0.005, 5.98 | 4104, 0, 0.128, 9.47 |
+| 4. Merge | 8981, 0, 0.030, 8.93 | 3220, 0, 0.025, 6.96 | 3974, 0, `10⁻⁴`, 6.64 | 9949, 3, 0.045, 5.97 | 7376, 0, 0.125, 8.93 |
+| 5. Collapse and flip | 3088, 0, 0, 9.02 | 3000, 0, 0, 7.04 | **338**, 0, 0, 6.64 | **2258**, 0, 0.005, 5.98 | **2378**, 0, 0.070, 9.31 |
 
-The vertices lie on their three planes to `10⁻¹²` or better. The problem is ill-conditioned (a gain of about `10⁸` from normals to position), but the tangent data is exact to about `10⁻¹⁶`, so the numerical error is at most about `10⁻⁸`. These are the true intersection points. Three tangent planes from points only 0.1 apart, with normals within 12°, can meet 600 units away when their normals are nearly coplanar: the planes then share an almost common line, and their single common point is far along it.
+Triangulate and Collapse and flip also output chamfer faces: 229 and 44 on the torus, 553 and 206 on the fandisk. Collapse and flip has 154 facets on the box (ideal: 6) and 1120 on the cylinder (1500 tangent points).
 
-The missing piece of the theory: that three faces adjacent on the contour have tangent planes meeting near the surface. That holds where neighboring normals spread in two directions. It fails along curves where they vary in only one direction (the torus's top and bottom circles, where one principal curvature is zero) and on cylinder-like regions in general. There the arrangement of the planes has long faces along the flat direction, its adjacency is anisotropic, and the contour's isotropic (Voronoi-like) adjacency can name a triple whose planes do not meet nearby. The trust region encodes the missing condition directly: an intersection is only used where the planes are valid.
+**Sparse samples** (300 near-surface): largest error. Merge 0.053 / 0.090 / `9·10⁻⁴` / 0.005 / 0.158 (torus, two spheres, box, cylinder, fandisk); Collapse and flip 0.173 / 0.090 / 0.203 / 0.026 / 0.223; Contract 0.159 / 0.090 / 0.245 / 0.105 / 0.508; Triangulate 0.111 / 0.192 / 0.203 / 0.078 / 0.510; Extend fails on the box, cylinder and fandisk (errors above 1).
 
-![Near an inflection, the tangent lines at two neighboring points are nearly parallel and meet far away. The trust region, a circle around the contour vertex, excludes that intersection; the placed vertex moves only along the best-determined direction.](figures/fig-far-intersection.svg)
+### 3.3 Reading the comparison
 
-*The 2D analog. Near an inflection (zero curvature) the tangent lines of two neighbors are nearly parallel and offset, so their exact intersection is far (here 2.7 from the contour vertex, about six times its distance to the farther tangent point). It is the correct intersection of the two lines; the lines are just not valid that far out. The trust region (2 × the distance to the farther tangent point) rejects it, and the vertex moves only along the best-determined direction, onto the average line.*
+- **The raw contour with tangent balls is already a good surface** (errors of `10⁻³` on the box and cylinder), only too complex and not made of tangent facets. Merge inherits its accuracy.
+- **Plane intersections are exact where the connectivity is right and wrong where it is not.** The methods that intersect planes (1, 2, 3, 5) are exact (Extend: `3·10⁻⁵`) on the box with uniform samples, but their errors on smooth and developable parts are governed by triples that are not neighbors in the planes' arrangement, hidden by the trust region and chamfers.
+- **Collapse and flip has the fewest bad vertices among the plane-intersection methods** on almost every case and is the only one that reduces the face count toward what the planes require. Its worst vertices on the fandisk (0.173) are exact intersections of independent planes within the trust radius: the trust radius is a weak test of validity.
+- **Merge is the most accurate** but pays in planarity (off-plane up to 0.045 on the cylinder, 0.125 on the fandisk), vertex count (up to 3–4× on the torus and cylinder), and saddles (its steps do not flatten there).
+- **Extend own faces** is rarely better and has cracks everywhere; **Clip tangent planes** has perfect facets but no shared edges.
+- **The fandisk is hard for everyone**: features closer together than a few sample spacings bound the tangent balls (a quarter are smaller than 0.18, about two spacings), and they make the plane-intersection methods name wrong triples.
 
-| exact intersections, no trust region | `tau = 10⁻²`, no trust region | exact + trust 2 (default) |
-|---|---|---|
-| ![Torus recovered with exact intersections: long spikes in every direction.](figures/torus-exact.png) | ![Torus recovered with tau = 1e-2: no spikes.](figures/torus-tau.png) | ![Torus recovered with exact intersections in a trust region: no spikes.](figures/torus-trust.png) |
+## 4. Parameters
 
-*Torus, 1500 uniform samples, `s = 0.1`, Contract contour regions. Left: exact intersections fly up to 615 units away. Middle: dropping small eigenvalues removes them, but it also drops exact intersections at sharp features (the box then has 16 vertices off). Right: the trust region removes them and keeps exact intersections where they are near.*
-
-### Results of the fix
-
-Contract contour regions, `s = 0.1`; "off" counts vertices with `|sdf| > 0.02`:
-
-| | `tau = 10⁻²` (previous default) | exact (`tau = 10⁻¹²`), no trust region | exact + trust 2 (default) |
+| parameter | used by | default | effect |
 |---|---|---|---|
-| torus, 1500 uniform | 26 off, max 0.080, area 9.03 | 277 off, max 615, area 41.9 | 64 off, max 0.076, area 9.11 |
-| torus, 300 uniform | 138 off, max 0.23, area 9.84 | 236 off, max 65, area 27.9 | 173 off, max 0.24, area 9.66 |
-| two spheres, 1500 uniform | 22 off, max 0.032, area 6.95 | 37 off, max 1.24, area 8.83 | 27 off, max 0.067, area 7.06 |
-| box, 1500 uniform | 16 off, max 0.046, area 6.68 | 0 off, area 6.64 (exact) | 0 off, area 6.64 (exact) |
-| box, 300 uniform | 28 off, max 0.13, area 6.79 | 0 off, area 6.64 | 0 off, area 6.64 |
-| torus, 1500 near surface | 0 off, max 0.017 | 198 off, max 50 | 24 off, max 0.033 |
-| two spheres, 1500 near surface | 3 off, max 0.039, crease 0.007 | 25 off, max 9.9 | 8 off, max 0.056, crease 0.009 |
+| sphere scale `s` | 1, 2, 3, 5 | 0.1 | Changes only the steps. Extend wants `s → 0` (open edges on the torus: 1328 at `s = 1`, 84 at 0.1); Contract and Triangulate are best at 0.1–1; below about 0.01 the absolute tolerance and nearest-tangent ties add hole edges. |
+| dependent planes `tau` | 1, 2, 3, 5 | `10⁻¹²` | Exact: keeps the box exact. `10⁻²` improves smooth shapes (Triangulate on the torus: 14 → 9 off) but rounds sharp corners (box: 16 off). The window `(κh)² ≪ tau ≪ tan²(θ_feature/2)` has no universal setting. |
+| trust radius | 1, 2, 3, 5 | 2 | Required with exact `tau`: without it the torus reaches 13.8 (Triangulate) or 615 (Contract). 1 cuts box corners (59 off); 4 lets more extrapolation error in. |
+| ball size `ρ`, cap | 4 | 0.5, 100 | Steps shrink like `1/cap` on convex parts (median step `9·10⁻⁶` at cap 100 against `4·10⁻³` for Voronoi). `ρ < 1` keeps other tangent points strictly outside the balls. |
+| chamfer, stitch | 3, 5 | on | Chamfers make facets exactly planar (off-plane `10⁻¹³` instead of 0.008 on the torus) at the cost of extra faces. |
+| snap, gap faces | 4 | off | Snap halves the off-plane distance; gap faces make facets planar but expose gaps as wide as the steps. |
 
-True areas: torus 8.88, two spheres 6.91, box 6.64. "Crease" is the median distance from crease vertices to the true crease circle.
+## 5. What to keep
 
-The trust region removes every far vertex while keeping exact intersections where they are valid, so the box comes out exact. On smooth parts it keeps more intersections than `tau = 10⁻²` did, and an intersection two spacings out carries about `κr²/2` of extrapolation error, so a few more vertices are off by more than 0.02 there; the worst errors are about the same. With `trust = 1` smooth parts are tighter but some box corners are cut short (59 off at 1500 samples).
+Back to the goal: facets on tangent planes, each containing its tangent point, tiling the shape and sharing edges. Each approach contributes one clean idea, about either connectivity or geometry.
 
-| box | two spheres |
-|---|---|
-| ![Box recovered with the default: flat faces and sharp edges and corners.](figures/box-trust.png) | ![Two spheres recovered with the default: smooth spheres, with fins along the crease.](figures/twospheres-trust.png) |
+**Geometry is free once connectivity is right.** If each facet lies exactly in its plane and every vertex is shared by three facets, every vertex is forced to be `P_a ∩ P_b ∩ P_c`: there is nothing left to optimize. So vertex optimization has room only where the model is relaxed: soft planarity (Merge's snap), vertices shared by more than three facets (least squares), or merged facets. **The real problem is choosing the dual triangulation**, and a good triangulation is one whose triple points are near, whose edges are not inverted, and whose facets contain their tangent points.
 
-*Default settings, 1500 uniform samples, `s = 0.1`. The box is exact: every vertex is an exact intersection of its planes. The two spheres are smooth, but the concave crease still has fins: faces whose vertices are each near the surface (max 0.067 off) but which reach across the crease.*
+The best parts of each method:
 
-## Is there an ideal `s` and `tau`?
+- **The power contour, sphere scale and tangent balls: exact seed facets.** The bisector of any sphere tangent at `t_a` and `t_a` itself is `P_a`, so every diagram of this kind contains, for free, a polygon in each tangent plane containing its tangent point. Everything else is "steps".
+- **Contract contour regions: always a valid tiling.** Painting the contour by nearest tangent point gives a partition that is closed by construction, with a complete set of topology cases. It is the right fallback and the right tie-break where planes coincide, and a safe starting triangulation, but it is isotropic.
+- **Extend own faces: a negative result worth stating.** Adjacency must be decided once, on a shared structure (a partition or a dual triangulation); per-face decisions leave cracks.
+- **Triangulate step patches: the planes decide the connectivity.** Convex and concave edges are read from data alone (`f_a(t_b) + f_b(t_a)`); envelopes are regular triangulations of the planes; saddles are lattice (max–min) polyhedra with a two-way decider. Step patches localize the decision into small polygon triangulation problems that a dynamic program solves exactly.
+- **Tangent balls: the right connectivity on developable and flat parts, from the diagram itself.** Large empty tangent balls flatten steps like `1/λ`, so the diagram's regions follow the envelope, including strips along rulings that no plane-intersection method builds. The impossibility result (no generator puts `P_a ∩ P_b` in the walls) explains why a combinatorial step is always needed after the diagram.
+- **Collapse and flip: plane-only predicates.** The `4 × 4` determinant `D4` decides envelope flips without computing a triple point and works at infinity; the signed length of an edge along `P_p ∩ P_q` detects folds; coplanar facets merge, so a facet can own many tangent points. These are the local validity tests that a connectivity search needs.
+- **Vertex placement: a validity guard, not a fix.** The trust region and the `Q`-circumcenter analysis explain far vertices as wrong combinatorics.
 
-Both theory and experiments. Experiments: 1500 uniform random samples, seed 1; "see-through" counts rays from outside to an interior point that cross no face (out of 400); true areas are torus 8.88, two spheres 6.91, box 6.64.
+**Toward a tiling by tangent-plane facets**, the pieces combine naturally, and the following are untried:
 
-### Sphere scale: it depends on the method
+1. **Tangent-ball connectivity with plane geometry.** Merge gets the connectivity right on convex, concave, flat and developable parts but its geometry is off-plane; Collapse and flip gets exactly planar geometry but inherits isotropic connectivity. Take the adjacency of Merge's regions as the dual triangulation, place vertices at triple points, and then apply Collapse and flip. Strip–strip–strip junctions (three parallel planes) would still need collapsing into longer strips.
+2. **Containment as a test.** For a convex edge `a–b`, facet `a` lies where `f_b ≤ 0`, so `t_a` is on the right side of that edge iff `f_b(t_a) ≤ 0`; for a concave edge, iff `f_b(t_a) ≥ 0`. A pair with `f_a(t_b)` and `f_b(t_a)` of opposite signs therefore cannot share an edge with both tangent points inside their facets. This is a data-only, per-edge admissibility test, and none of the methods uses it yet; it could join the flip cost or veto edges.
+3. **Anisotropic Delaunay of the tangent points.** Estimate `Q` (the second fundamental form) from neighboring normals and build the Delaunay triangulation in that metric. By the `Q`-circumcenter identity it minimizes the vertex error on definite patches, and where `Q` degenerates (developable parts) it yields the strip ladder directly.
+4. **Global search over triangulations.** Local flips stall on ties (cylinder) and on mixed quads (saddles). A global objective over the dual triangulation (far vertices + inverted edges + containment), searched by annealing or seeded from several starts (partition, tangent-ball regions), would not stall at the first local minimum.
+5. **The samples' empty spheres as a constraint.** No surface point lies inside a sample's sphere `B(p, |d|)`, so a vertex inside one is at least that deep off the surface. On the near-surface fandisk this test catches 16 of 67 bad vertices with 2 false alarms in 2791, without knowing the surface.
+6. **Soft optimization after connectivity is fixed.** Minimize `Σ f_a(x)²` over each facet's vertices plus hinge penalties for containment and edge orientation, with a small pull toward the contour vertices. This is where the "optimize polygon vertices" idea belongs: at vertices of degree four or more and where planes are nearly dependent.
 
-**Theory.** By (1), `s` changes only the steps, and `s → 0` gives the Voronoi cells of the tangent points: the restricted-Delaunay neighborhood that surface reconstruction theory works with. Larger `s` lets far samples' big spheres make wide steps. Two things limit how far toward 0 to go:
+## References
 
-- *Numerical precision.* `powerdiagram.js` decides inside/outside with an absolute tolerance of `1e-10` on `2(p_j − p_i)·x − c`, and for a sample and its own tangent point `|p_j − p_i| = s|d|`. So the tangent plane is resolved only to about `1e-10 / (2 s |d|)`, which grows as `1/s`. A tolerance relative to `|p_j − p_i|` would push this floor lower.
-- *Ties in the partition.* As `s → 0`, each step lies on the Voronoi bisector of its two owners, so the partition's rule (give the step to the owner with the nearer tangent point) becomes a tie, decided by rounding. Extend own faces has no such rule.
-
-**Experiments.** Contract contour regions, `tau = 10⁻²`:
-
-| `s` | 1 | 0.1 | 0.01 | 10⁻³ | 10⁻⁴ | 10⁻⁵ | 10⁻⁶ |
-|---|---|---|---|---|---|---|---|
-| torus: open edges | 0 | 8 | 13 | 20 | 100 | 670 | 2066 |
-| torus: see-through | 0 | 0 | 1 | 1 | 2 | 27 | 113 |
-| two spheres: open edges | 0 | 0 | 0 | 51 | 299 | 1288 | 1319 |
-| two spheres: see-through | 0 | 0 | 0 | 3 | 22 | 162 | 329 |
-
-With 300 samples the partition prefers smaller `s`: hole edges at `s = 1` vs `0.1` are 14 vs 0 on the two spheres and 18 vs 0 on the box.
-
-Extend own faces depends on `s` much more strongly. On the torus it has 50 see-through rays and 1328 open edges at `s = 1`, against 2 and 84 at `s = 0.1`, and 0 and 15 at `s = 0.01`. Collapsing each owner's two sites into one is valid where every owner pair ends up at exactly two vertices; on the torus, the number of pairs that do not drops from 3483 at `s = 1` to 203 at `s = 0.01`.
-
-So the ideal is the limit `s → 0` for Extend own faces, as far as the arithmetic allows (about `0.01` with the current tolerance). Contract contour regions is less sensitive and does best around `s = 0.1–1`, degrading slowly below that because of the ties. `s = 0.1` is a good setting for both.
-
-### Dependent planes: not a precision parameter on its own
-
-**Theory.** An exact intersection of three exact tangent planes is the right vertex only if those three faces really are adjacent in the arrangement of the planes. The contour's adjacency is isotropic (Voronoi-like). The plane arrangement's is not: on saddles, and near curves of zero Gaussian curvature such as the torus's top and bottom circles, neighboring normals lie nearly on one great circle, and the true intersection of three neighboring planes can be far away. Where the two disagree, the exact intersection is a spike. On smooth parts, three neighboring normals differ by about `κh`, so the eigenvalue ratio of `Σ n nᵀ` is of order `(κh)²` times a small shape factor. At real features (box edges and corners, the two-sphere crease at 110°) it is of order 1. So `tau` is a threshold between curvature-scale and feature-scale normal changes: it should satisfy roughly `(κh)² ≪ tau ≪ tan²(θ_feature / 2)`. That window widens as sampling gets denser, but at a fixed density there is no setting that is right "up to numerical precision".
-
-**Experiments.** Contract contour regions, `s = 0.1`:
-
-| | `tau = 10⁻¹²` (exact) | `tau = 10⁻²` |
-|---|---|---|
-| torus: vertices off by > 0.02 | 277, max 615 | 26, max 0.08 |
-| torus: area | 41.9 | 9.03 |
-| two spheres: max error, area | 1.24, 8.83 | 0.032, 6.95 |
-| box: vertices off by > 0.02, area | 0, 6.64 (exact) | 16, 6.68 |
-
-The box wants exact intersections (its planes are exactly coplanar or exactly orthogonal), the curved shapes do not.
-
-The eigenvalue ratios confirm that there is no clean threshold on smooth parts. With exact intersections, the torus vertices that fly off have ratios with median `6·10⁻⁶` but up to `4·10⁻²`, while the good ones have median `1.6·10⁻⁴`. On the two spheres, the bad ones (median `5·10⁻³`) are better conditioned than the good ones (`6.6·10⁻⁴`). So the remaining outliers are combinatorial, not numerical, and `tau = 10⁻²` works by switching plane intersection off on nearly all smooth parts (where the contour vertex is as accurate, both errors being `O(κh²)`) and keeping it at features.
-
-With the trust region (see *Vertex placement*), `tau` no longer has to do this job and can be set to numerical precision. A fuller fix would also take the combinatorics from the plane arrangement near such vertices (which faces the local envelope of the planes makes adjacent) instead of only limiting how far the vertex moves.
-
-## Results
-
-Before the trust region: 1500 samples, `s = 0.1`, `tau = 10⁻²` (see *Results of the fix* for the current default):
-
-| | torus, uniform | two spheres, uniform | torus, near surface |
-|---|---|---|---|
-| Contract contour regions | see-through 0, area 9.03, 26 vertices off > 0.02 | see-through 0 (and 0 of 600 through the crease band), area 6.95, max error 0.032 | see-through 0, 0 open edges, 0 off, area 8.96 |
-| Extend own faces | see-through 2, area 8.99, 22 off | see-through 0 (0 of 600 through the crease), area 6.99 | see-through 0, area 8.96 |
-
-## Open problems
-
-- Cracks in Extend own faces, whose neighbors are read locally (see the 2D figure); the chain rule is global, but its 3D form needs a triangulation of each step patch (see *Ideas*).
-- Where the contour's adjacency does not match the plane arrangement, the trust region keeps vertices near the surface, but their faces are then no longer exactly planar.
-- The absolute tolerance in `powerdiagram.js` limits how small `s` can be.
+F. Aurenhammer, Power diagrams: properties, algorithms and applications, *SIAM J. Computing* 16(1), 1987. N. Amenta, S. Choi and R. K. Kolluri, The power crust, *ACM Symposium on Solid Modeling and Applications*, 2001. H. Fuchs, Z. M. Kedem and S. P. Uselton, Optimal surface reconstruction from planar contours, *Communications of the ACM* 20(10), 1977. G. T. Klincsek, Minimal triangulations of polygonal domains, *Annals of Discrete Mathematics* 9, 1980. G. M. Nielson and B. Hamann, The asymptotic decider: resolving the ambiguity in marching cubes, *IEEE Visualization*, 1991. S. Ovchinnikov, Max-min representation of piecewise linear functions, *Beiträge zur Algebra und Geometrie* 43(1), 2002.
