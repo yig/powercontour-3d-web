@@ -100,6 +100,7 @@
       <option value="patches">Triangulate step patches</option>
       <option value="merge">Merge steps into faces</option>
       <option value="collapse">Collapse and flip</option>
+      <option value="ballplanes">Ball connectivity, plane vertices</option>
       <option value="clip">Clip tangent planes</option>
     </select></div>
   <label class="check"><input type="checkbox" id="recPreset" checked> Recommended settings on method change</label>
@@ -109,6 +110,9 @@
     <label class="check" id="eMergeRow"><input type="checkbox" id="eMerge" checked> Merge flipped junctions</label>
     <label class="check" id="pChamferRow"><input type="checkbox" id="pChamfer" checked> Chamfer far vertices</label>
     <label class="check" id="pStitchRow"><input type="checkbox" id="pStitch" checked> Stitch two-loop patches</label>
+    <label class="check" id="pContainRow"><input type="checkbox" id="pContain"> Keep tangent points inside faces when flipping</label>
+    <label class="check" id="pMetricRow"><input type="checkbox" id="pMetric"> Flip toward curvature-metric Delaunay</label>
+    <label class="check" id="pSoftRow"><input type="checkbox" id="pSoft"> Soft vertices (least squares, no chamfers)</label>
   </div>
   <div id="mergeOpts">
     <label class="check"><input type="checkbox" id="mSnap"> Snap vertices toward their planes</label>
@@ -260,7 +264,8 @@ function disposeGroup(obj) {
 }
 
 const extendOpts = () => ({ tau: 10 ** +$('eTau').value, trust: +$('eTrust').value >= 10 ? Infinity : +$('eTrust').value, maxJunction: $('eMerge').checked ? 4 : 3,
-  chamfer: $('pChamfer').checked, stitch: $('pStitch').checked });
+  chamfer: $('pChamfer').checked && !$('pSoft').checked, stitch: $('pStitch').checked,
+  contain: $('pContain').checked ? 'flips' : false, metric: $('pMetric').checked, soft: $('pSoft').checked });
 // The clip options only re-clip; the diagrams are not recomputed.
 const clipOpts = () => ({ parallelDeg: +$('cParallel').value, features: $('cFeatures').checked, similarDeg: +$('cSimilar').value,
   turnFactor: +$('cTurn').value, marginDeg: +$('cMargin').value, onPlaneFactor: +$('cOnPlane').value,
@@ -318,6 +323,10 @@ function compute() {
     data.recovered = Recover.extendOwnFaces(sites, signs, owner, cells, planes, extendOpts());
   } else if ((method === 'patches' || method === 'collapse') && contractible) {
     data.recovered = Recover.triangulatePatches(sites, signs, owner, cells, planes, { ...extendOpts(), rank: method === 'collapse' });
+  } else if (method === 'ballplanes' && contractible) {
+    // Idea 1: the connectivity of Merge steps into faces' regions (meant for tangent balls), with
+    // vertices where the planes meet, then Collapse and flip.
+    data.recovered = Recover.triangulatePatches(sites, signs, owner, cells, planes, { ...extendOpts(), partition: 'plane', patchDP: false, rank: true });
   } else if (method === 'merge' && contractible) {
     data.recovered = Recover.mergeSteps(sites, signs, owner, cells, planes, { snap: $('mSnap').checked ? 0.1 : 0, gaps: $('mGaps').checked });
   } else if (method === 'regions' && contractible) {
@@ -605,9 +614,10 @@ function applyVisuals() {
   $('clipOpts').style.display = $('recMethod').value === 'clip' ? '' : 'none';
   $('mergeOpts').style.display = $('recMethod').value === 'merge' ? '' : 'none';
   for (const id of ['ballRhoRow', 'ballCapRow']) $(id).style.display = $('balls').checked ? '' : 'none';
-  $('extendOpts').style.display = ['extend', 'regions', 'patches', 'collapse'].includes($('recMethod').value) ? '' : 'none';
+  $('extendOpts').style.display = ['extend', 'regions', 'patches', 'collapse', 'ballplanes'].includes($('recMethod').value) ? '' : 'none';
   $('eMergeRow').style.display = $('recMethod').value === 'extend' ? '' : 'none';
-  for (const id of ['pChamferRow', 'pStitchRow']) $(id).style.display = ['patches', 'collapse'].includes($('recMethod').value) ? '' : 'none';
+  for (const id of ['pChamferRow', 'pContainRow', 'pMetricRow', 'pSoftRow']) $(id).style.display = ['patches', 'collapse', 'ballplanes'].includes($('recMethod').value) ? '' : 'none';
+  $('pStitchRow').style.display = ['patches', 'collapse'].includes($('recMethod').value) ? '' : 'none';
   for (const id of ['npts', 'sScale', 'ballRho', 'ballCap', 'eTau', 'eTrust', 'sphOp', 'pcOp', 'surfOp', 'sliceZ', 'cParallel', 'cSimilar', 'cTurn', 'cMargin', 'cOnPlane']) $(id + '-v').textContent = (+$(id).value).toString().slice(0, 5);
 }
 
@@ -636,7 +646,9 @@ function patchLine(r) {
     `${t.patches} step patches (${t.stitched} stitched, ${t.partitioned} by restricted Delaunay, ${t.flips} flips), ${t.chamfers} chamfers, ${t.junctions} junctions; loops ${t.convex} convex, ${t.concave} concave, ` +
     `${t.saddle} saddle, ${t.flat} flat` + (t.nonManifoldEdges ? `; ${t.nonManifoldEdges} non-manifold edges` : '') + (t.facelessOwners ? `; ${t.facelessOwners} tangent points without a face` : '') + '\n' +
     (t.collapsed === undefined ? '' : `collapse and flip: ${t.collapsed} coplanar collapses, ${t.envelopeFlips} envelope flips, ${t.mixedFlips} mixed flips; ` +
-      `dependent triangles (exactly / nearly) ${t.dependentBefore.join(' / ')} → ${t.dependentAfter.join(' / ')}\n`);
+      `dependent triangles (exactly / nearly) ${t.dependentBefore.join(' / ')} → ${t.dependentAfter.join(' / ')}\n`) +
+    (t.metricFlips === undefined ? '' : `curvature-metric flips: ${t.metricFlips} (${t.metricFeatures} feature points left to the planes)\n`) +
+    (t.soft ? `soft vertices: containment violations ${t.soft.before.n} → ${t.soft.after.n} edges\n` : '');
 }
 
 function mergeLine(r) {
@@ -673,12 +685,15 @@ const HELP = {
   pcEdges: 'Outline the contour faces.',
   pcColorBy: 'Uniform gold, or color each face by the kinds of sites it separates, with a legend and counts. Green faces (a sample and its own tangent point) lie exactly in the tangent plane; the others are steps between them.',
   recPreset: 'When the method changes, set the controls it uses to their recommended values: sampled + tangent points, sphere scale 0.1, exact dependent planes (−12) and trust radius 2 for the plane-intersection methods (with Merge flipped junctions, Chamfer and Stitch on); tangent balls with ρ 0.5 and cap 10² for Merge steps into faces; the default clip options for Clip tangent planes. Uncheck to keep your own settings when switching. See RECOVERY.md, Parameters.',
-  recMethod: 'Build a surface whose faces lie in the tangent planes. Contract contour regions: give each other contour face to one of its two own faces, and intersect the tangent planes where regions meet. Extend own faces: extend each own face from its own boundary, without assigning the other faces. Triangulate step patches: remove each patch of other faces by triangulating the loop of own faces around it, choosing the triangulation from the tangent planes (their envelope where the loop is convex or concave; a decider on saddles). Merge steps into faces: give each other contour face to the owner whose tangent plane it is nearer, and keep every vertex of the resulting regions at its contour position (a vertex of the power diagram, never a plane intersection). Meant for Tangent balls, where the steps nearly lie in the planes; faces are then planar up to the step heights. Collapse and flip: Triangulate step patches, then merge faces whose planes coincide, flip toward the planes’ envelope where four faces are all convex or all concave (a test with the 4 × 4 determinant of the planes, valid even when three planes meet at infinity), and in quads with convex and concave edges flip where it pulls vertices into the trust radius and un-inverts edges. These five need sampled + tangent points only. Clip tangent planes: clip each tangent plane by its neighbors’ planes (any sites). See RECOVERY.md.',
+  recMethod: 'Build a surface whose faces lie in the tangent planes. Contract contour regions: give each other contour face to one of its two own faces, and intersect the tangent planes where regions meet. Extend own faces: extend each own face from its own boundary, without assigning the other faces. Triangulate step patches: remove each patch of other faces by triangulating the loop of own faces around it, choosing the triangulation from the tangent planes (their envelope where the loop is convex or concave; a decider on saddles). Merge steps into faces: give each other contour face to the owner whose tangent plane it is nearer, and keep every vertex of the resulting regions at its contour position (a vertex of the power diagram, never a plane intersection). Meant for Tangent balls, where the steps nearly lie in the planes; faces are then planar up to the step heights. Ball connectivity, plane vertices: the regions of Merge steps into faces (on tangent balls) as connectivity, with vertices where the planes meet, then Collapse and flip. Collapse and flip: Triangulate step patches, then merge faces whose planes coincide, flip toward the planes’ envelope where four faces are all convex or all concave (a test with the 4 × 4 determinant of the planes, valid even when three planes meet at infinity), and in quads with convex and concave edges flip where it pulls vertices into the trust radius and un-inverts edges. These six need sampled + tangent points only. Clip tangent planes: clip each tangent plane by its neighbors’ planes (any sites). See RECOVERY.md.',
   mSnap: 'Merge steps into faces: move each vertex to the point that minimizes the squared distances to its faces’ tangent planes plus 0.1 × its squared distance to its contour position. Faces get flatter; vertices move by about the step height.',
   mGaps: 'Merge steps into faces: give every face its own copies of its corners, projected onto its tangent plane, so it is exactly planar; then close the gaps between neighbors with orange gap faces (one per shared edge, one per vertex shared by three or more faces). Watertight; the gaps are as wide as the steps.',
   eTau: 'Planes count as dependent (e.g. coplanar faces of the box) when eigenvalues of Σ n nᵀ fall below 10^value × the largest; the vertex then keeps its contour position in those directions. With the trust radius on, this only needs to catch exact degeneracies: −12 is numerical precision. Without it (trust at 10 = off), about −2 is needed to stop nearly dependent planes from sending vertices far away.',
   eTrust: 'A tangent plane is only accurate within about one sample spacing of its tangent point. A vertex may move at most this many spacings (the distance from its contour position to the farthest of its tangent points) away from its contour position: it is the exact intersection of its planes if that is near, else the nearest point on the line where the two best-determined planes meet, else on one plane. 2 keeps box corners exact and removes far-away vertices on curved shapes. 10 = off.',
   pChamfer: 'Triangulate step patches and Collapse and flip: where three tangent planes meet beyond the trust radius, replace that vertex by a small orange chamfer face with one point on each line where two of the planes meet. Every tangent-plane face then stays exactly planar. Off: the vertex is pulled back within the trust radius instead, off some of its planes.',
+  pContain: 'Triangulate step patches, Collapse and flip, Ball connectivity: when flipping, do not make two faces adjacent if that would put one of their tangent points on the wrong side of their shared edge (f_a(t_b) and f_b(t_a) of opposite signs). See RECOVERY.md, Idea 2.',
+  pMetric: 'Triangulate step patches, Collapse and flip, Ball connectivity: before vertex placement, flip the connectivity toward the Delaunay triangulation in a curvature metric estimated from neighboring normals (|shape operator| + ε). Makes faces long along flat directions (cylinder rulings); quads with a point where the normal turns faster than 1 radian per spacing (a sharp feature) are left alone. See RECOVERY.md, Idea 3.',
+  pSoft: 'Triangulate step patches, Collapse and flip, Ball connectivity: instead of chamfers, place each vertex by least squares on its faces’ planes with a small pull (0.01) toward its trust-limited position. Faces are then planar up to that pull. See RECOVERY.md, Idea 6.',
   pStitch: 'Triangulate step patches and Collapse and flip: a patch of steps with two boundary loops (a ring, or an own face as an island inside it) is triangulated by stitching the two loops with the planes’ envelope cost. Off: such patches keep the nearest-tangent-point partition.',
   eMerge: 'Extend own faces: where four owners meet at nearly one point and their faces disagree about which diagonal is an edge, merge the junction into one vertex where all four planes meet. Off: such junctions leave cracks.',
   cParallel: 'Clip tangent planes: neighbors whose normals differ by less than this angle are split by their Voronoi bisector instead of by the line where their planes meet.',
@@ -736,18 +751,20 @@ document.addEventListener('drop', e => { e.preventDefault(); readOBJFile(e.dataT
 for (const id of ['sampling', 'seed', 'sampled', 'tangent', 'mirrored', 'sScale', 'balls', 'ballRho', 'ballCap', 'mSnap', 'mGaps']) $(id).addEventListener('change', compute);
 for (const id of ['ballRho', 'ballCap']) $(id).addEventListener('input', applyVisuals);
 $('sScale').addEventListener('input', applyVisuals);
-for (const id of ['eTau', 'eTrust', 'eMerge', 'pChamfer', 'pStitch']) $(id).addEventListener('change', compute);
+for (const id of ['eTau', 'eTrust', 'eMerge', 'pChamfer', 'pStitch', 'pContain', 'pMetric', 'pSoft']) $(id).addEventListener('change', compute);
 for (const id of ['eTau', 'eTrust']) $(id).addEventListener('input', applyVisuals);
 // Recommended settings per method (RECOVERY.md, Parameters), applied when the method changes if
 // "Recommended settings on method change" is checked. Only the inputs a method uses are set.
 const PLANE_PRESET = { sampled: true, tangent: true, mirrored: false, balls: false, sScale: 0.1,
-  eTau: Math.log10(Recover.PATCH_DEFAULTS.tau), eTrust: Recover.PATCH_DEFAULTS.trust };
+  eTau: Math.log10(Recover.PATCH_DEFAULTS.tau), eTrust: Recover.PATCH_DEFAULTS.trust, pContain: false, pMetric: false, pSoft: false };
 const C = Recover.CLIP_DEFAULTS;
 const METHOD_PRESETS = {
   regions: PLANE_PRESET,
   extend: { ...PLANE_PRESET, eMerge: true },
   patches: { ...PLANE_PRESET, pChamfer: Recover.PATCH_DEFAULTS.chamfer, pStitch: Recover.PATCH_DEFAULTS.stitch },
   collapse: { ...PLANE_PRESET, pChamfer: Recover.PATCH_DEFAULTS.chamfer, pStitch: Recover.PATCH_DEFAULTS.stitch },
+  ballplanes: { ...PLANE_PRESET, balls: true, ballRho: Recover.BALL_DEFAULTS.rho, ballCap: Math.log10(Recover.BALL_DEFAULTS.cap),
+    pChamfer: Recover.PATCH_DEFAULTS.chamfer, pContain: false, pMetric: false, pSoft: false },
   merge: { sampled: true, tangent: true, mirrored: false, balls: true, ballRho: Recover.BALL_DEFAULTS.rho,
     ballCap: Math.log10(Recover.BALL_DEFAULTS.cap), mSnap: Recover.MERGE_DEFAULTS.snap > 0, mGaps: Recover.MERGE_DEFAULTS.gaps },
   clip: { cParallel: C.parallelDeg, cUnion: C.concaveUnion, cMutual: C.mutualConvex, cRing2All: C.ring2All, cFeatures: C.features,

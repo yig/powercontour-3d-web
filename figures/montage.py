@@ -1,13 +1,13 @@
 # Compose the comparison grid of RECOVERY.md (figures/comparison.png) from the cmp-* shots of shoot3d.sh.
-# `python3 figures/montage.py` (needs Pillow). Rows: shapes; columns: the raw contour and the five methods.
+# `python3 figures/montage.py` (needs Pillow). Rows: shapes; columns: the raw contour, the five methods, and Idea 1.
 import os
 from PIL import Image, ImageDraw, ImageFont
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
-ROWS = [('torus', 'Torus'), ('twospheres', 'Two spheres'), ('box', 'Box'), ('cylinder', 'Cylinder'), ('fandisk', 'Fandisk')]
+ROWS = [('torus', 'Torus'), ('twospheres', 'Two spheres'), ('box', 'Box'), ('cylinder', 'Cylinder'), ('fandisk', 'Fandisk'), ('horse', 'Horse')]
 COLS = [('contour', 'Power contour', 'sample spheres, s = 0.1'), ('ballcontour', 'Power contour', 'tangent balls'),
         ('regions', '1. Contract', 'contour regions'), ('extend', '2. Extend', 'own faces'),
         ('patches', '3. Triangulate', 'step patches'), ('merge', '4. Merge steps', 'tangent balls'),
-        ('collapse', '5. Collapse', 'and flip')]
+        ('collapse', '5. Collapse', 'and flip'), ('ballplanes', 'Idea 1: ball', 'connectivity, planes')]
 W, H, LW, TH = 300, 250, 120, 54
 font = lambda s: ImageFont.truetype('/System/Library/Fonts/Helvetica.ttc', s)
 im = Image.new('RGB', (LW + W * len(COLS), TH + H * len(ROWS)), (27, 29, 34))

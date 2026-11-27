@@ -45,20 +45,23 @@ shot torus-tau 480 400 "{$REC, \"shape\": \"torus\", \"eTau\": -2, \"eTrust\": 1
 shot torus-trust 480 400 "{$REC, \"shape\": \"torus\", \"eTau\": -12, \"eTrust\": 2}"
 # Tangent balls: the contour by face type (compare torus-contour).
 shot torus-balls-contour 640 480 "{$BASE, \"shape\": \"torus\", \"npts\": 300, \"balls\": true, \"pcColorBy\": \"type\", \"pcOp\": 1, \"slice\": true, \"sliceZ\": 0}"
-# The comparison grid of RECOVERY.md: every shape (1500 near-surface samples) by every method, with the
+# The comparison grid of RECOVERY.md: every shape (1500 uniform samples) by every method, with the
 # raw power contour (colored by face type) with sample spheres and with tangent balls as the first columns. Shot names: cmp-<shape>-<method>.
-CMP="$BASE, \"npts\": 1500, \"sampling\": \"band\", \"sScale\": 0.1, \"pcOp\": 0, \"pcEdges\": false"
+CMP="$BASE, \"npts\": 1500, \"sampling\": \"random\", \"sScale\": 0.1, \"pcOp\": 0, \"pcEdges\": false"
 FANDISK="${FANDISK:-$PWD/../../code-release/examples/fandisk.obj}"
+HORSE="${HORSE:-$PWD/../../../paper-math-code/code/third_party/gpytoolbox/test/unit_tests_data/horse.obj}"
 cmpshape() { # name "shape json fragment"
   shot cmp-$1-contour 480 400 "{$CMP, $2, \"recMethod\": \"off\", \"pcOp\": 1, \"pcColorBy\": \"type\", \"pcEdges\": true}"
   shot cmp-$1-ballcontour 480 400 "{$CMP, $2, \"balls\": true, \"recMethod\": \"off\", \"pcOp\": 1, \"pcColorBy\": \"type\", \"pcEdges\": true}"
   for m in regions extend patches collapse; do shot cmp-$1-$m 480 400 "{$CMP, $2, \"recMethod\": \"$m\"}"; done
   shot cmp-$1-merge 480 400 "{$CMP, $2, \"balls\": true, \"recMethod\": \"merge\"}"
+  shot cmp-$1-ballplanes 480 400 "{$CMP, $2, \"balls\": true, \"recMethod\": \"ballplanes\"}"
 }
 cmpshape torus '"shape": "torus"'
 cmpshape twospheres '"shape": "twospheres", "cam": [0.6, -2.4, 1.6]'
 cmpshape box '"shape": "box"'
 cmpshape cylinder '"shape": "cylinder", "cam": [1.6, -2.2, 1.5]'
 [ -f "$FANDISK" ] && cmpshape fandisk "\"obj\": \"file://$FANDISK\", \"cam\": [1.7, -2.2, 1.6]"
+[ -f "$HORSE" ] && cmpshape horse "\"obj\": \"file://$HORSE\", \"cam\": [3.6, -1.5, 0.9]"
 rm -f "$TMP"
 python3 figures/montage.py

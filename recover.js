@@ -621,7 +621,13 @@
   // as possible to them on a saddle (mixed edges), which plays the role of an asymptotic decider.
   // Contour vertices where three or more own faces meet with no step between them are loops too.
   // The output faces are the duals: each own face's polygon is the cycle of triangles around it.
-  const PATCH_DEFAULTS = { tau: 1e-12, trust: 2, chamfer: true, stitch: true, rank: false };
+  // partition: how steps are labeled in step 1: 'nearest' tangent point (the restricted Voronoi
+  // diagram) or nearest 'plane' (as in Merge steps into faces; meant for tangent balls, whose steps
+  // nearly lie in the planes). patchDP: re-triangulate step patches from the planes (steps 2-3);
+  // false keeps the partition's junctions everywhere (Idea 1: tangent-ball connectivity, plane geometry).
+  const PATCH_DEFAULTS = { tau: 1e-12, trust: 2, chamfer: true, stitch: true, rank: false, partition: 'nearest', patchDP: true, contain: false, metric: false, metricEps: 0.02, metricFeature: 1, soft: false };
+  // contain (Idea 2): make two faces adjacent only if each keeps its tangent point on the inner side of
+  // their shared line; the violation is a cost for diagonals (steps 3, 4b) and a veto for envelope flips.
   const DP_MAX = 24; // longer loops, and patches with holes, keep the partition's junctions
   function triangulatePatches(sites, signs, owner, cells, planes, opts) {
     const o = { ...PATCH_DEFAULTS, ...opts };
@@ -629,7 +635,7 @@
     //    the nearer of its two owners, then cleaned up). The partition is the restricted Voronoi
     //    diagram of the tangent points; its junctions are the Delaunay triangles used wherever the
     //    planes do not decide (flat patches, patches with holes, long loops).
-    const base = recoverSurface(sites, signs, owner, cells, planes, 0, o.tau, o.trust);
+    const base = recoverSurface(sites, signs, owner, cells, planes, 0, o.tau, o.trust, { label: o.partition === 'plane' ? 'plane' : undefined });
     const { pts, faces, heFace } = base.contour;
     for (const F of faces) F.owners = [F.label, F.label];
     const across = (u, v) => heFace.get(`${v},${u}`); // the face on the other side of half-edge u -> v
@@ -654,6 +660,17 @@
       if (p === q) return 0;
       const s = f(p, planes.get(q).point) + f(q, planes.get(p).point), scale = dist2(planes.get(p).point, planes.get(q).point);
       return s < -1e-9 * scale ? -1 : s > 1e-9 * scale ? 1 : 0;
+    };
+    // How far adjacency p-q would put a tangent point outside its face. Face p's edge with q lies on
+    // P_p ∩ P_q, and t_p is on its inner side iff -etype · f_q(t_p) <= 0 (convex: t_p below P_q). With the
+    // type read from the same two values, at most one of the two terms is positive: they are inadmissible
+    // when f_p(t_q) and f_q(t_p) have opposite signs.
+    let inFlips = false; // set for step 4b, so contain: 'flips' applies only there
+    const containViol = (p, q) => {
+      if (!o.contain || p === q) return 0;
+      if (o.contain === 'flips' && !inFlips) return 0;
+      const et = etypeOf(p, q); if (!et) return 0;
+      return Math.max(0, -et * f(q, planes.get(p).point)) + Math.max(0, -et * f(p, planes.get(q).point));
     };
     const kindOf = types => { const cv = types.includes(-1), cc = types.includes(1); return cv && cc ? 'saddle' : cv ? 'convex' : cc ? 'concave' : 'flat'; };
     const pairKey = (a, b) => a < b ? `${a},${b}` : `${b},${a}`;
@@ -729,7 +746,8 @@
       const seqs = P.rings.map(ring => ringSeq(pi, ring, false));
       P.kind = kindOf(seqs.flatMap(q => q.map((p, i) => etypeOf(p.ow, q[(i + 1) % q.length].ow))));
       P.boundary = new Set(seqs.flatMap(q => q.length > 1 ? q.map((p, i) => pairKey(p.ow, q[(i + 1) % q.length].ow)) : []));
-      if (P.rings.length === 1 && seqs[0].length >= 3 && seqs[0].length <= DP_MAX) P.own = 'dp';
+      if (!o.patchDP) stats0.partitioned++;
+      else if (P.rings.length === 1 && seqs[0].length >= 3 && seqs[0].length <= DP_MAX) P.own = 'dp';
       else if (o.stitch && P.rings.length === 2 && seqs.every(q => q.length >= 1) && seqs.some(q => q.length >= 2) && seqs[0].length * seqs[1].length * Math.min(seqs[0].length, seqs[1].length) <= 2e5) P.own = 'stitch';
       else stats0.partitioned++;
     });
@@ -807,7 +825,7 @@
           cache.set(key, { owners: os, x, anchor: anc, cost: envCost(kind, x, os, owners) });
         }
         const t = cache.get(key);
-        return { ...t, cost: t.cost + spans.filter(([p, q]) => loopEdges.has(pairKey(p, q))).length * FORBID };
+        return { ...t, cost: t.cost + spans.filter(([p, q]) => loopEdges.has(pairKey(p, q))).length * FORBID + spans.reduce((c, [p, q]) => c + containViol(p, q), 0) };
       };
       if (m === 1) { for (let i = 0; i < k; i++) { const t = tri(A[i], A[(i + 1) % k], B[0], []); if (t.x) tris.push(t); } return; }
       let best = null;
@@ -882,7 +900,7 @@
         for (const a of os) { const { normal: n, point: t } = planes.get(a), c = n[0] * t[0] + n[1] * t[1] + n[2] * t[2];
           for (let p = 0; p < 3; p++) { r[p] += n[p] * c; for (let q = 0; q < 3; q++) A[p][q] += n[p] * n[q]; } }
         let forbid = 0;
-        for (const [p, q] of [[i, j], [j, l], [i, l]]) if ((q - p) % k !== 1 && (p - q + k) % k !== 1 && loopEdges.has(pairKey(seq[p].ow, seq[q].ow))) forbid += FORBID;
+        for (const [p, q] of [[i, j], [j, l], [i, l]]) if ((q - p) % k !== 1 && (p - q + k) % k !== 1) forbid += (loopEdges.has(pairKey(seq[p].ow, seq[q].ow)) ? FORBID : 0) + containViol(seq[p].ow, seq[q].ow);
         return { x: qefTruncated(A, r, anc, o.tau, trustRadius(anc, os, planes, o.trust)), anchor: anc, owners: os, forbid };
       };
       if (k > DP_MAX) { for (let l = 1; l + 1 < k; l++) { const t = vertexOf(0, l, l + 1); if (t) { t.patch = L.junctionOf; tris.push(t); } } continue; } // a junction of very many labels: fan
@@ -963,6 +981,112 @@
       }
     });
 
+    // Lawson flips on the dual triangulation. flipper() indexes the current triangles by edge;
+    // flipPass(test) runs one pass over a queue of edges, and test(a, b, c, d, t1, t2) decides for
+    // triangles (a, b, c), (a, c, d) whether to replace them by (a, b, d), (b, c, d). A flip may not
+    // create an edge that exists.
+    const flipper = () => {
+      const onEdge = new Map(), add = ti => { const o3 = tris[ti].owners; for (let r = 0; r < 3; r++) { const key = pairKey(o3[r], o3[(r + 1) % 3]); if (!onEdge.has(key)) onEdge.set(key, new Set()); onEdge.get(key).add(ti); } };
+      const del = ti => { const o3 = tris[ti].owners; for (let r = 0; r < 3; r++) onEdge.get(pairKey(o3[r], o3[(r + 1) % 3]))?.delete(ti); };
+      tris.forEach((_, ti) => add(ti));
+      const flipPass = test => {
+        const queue = [...onEdge.keys()]; let flips = 0;
+        for (let guard = 0; queue.length && guard < 50 * tris.length; guard++) {
+          const key = queue.pop(), ts = onEdge.get(key);
+          if (!ts || ts.size !== 2) continue;
+          const [t1, t2] = [...ts], [e0, e1] = key.split(',').map(Number), o1 = tris[t1].owners;
+          const r = [0, 1, 2].find(i => { const p = o1[i], q = o1[(i + 2) % 3]; return (p === e0 && q === e1) || (p === e1 && q === e0); });
+          if (r === undefined) continue;
+          const a = o1[r], b = o1[(r + 1) % 3], c = o1[(r + 2) % 3], o2 = tris[t2].owners, s2 = o2.indexOf(a);
+          if (s2 < 0 || o2[(s2 + 1) % 3] !== c) continue;
+          const d = o2[(s2 + 2) % 3];
+          if (b === d || edgeCount.has(pairKey(b, d)) || !test(a, b, c, d, t1, t2)) continue;
+          del(t1); del(t2); countEdges(tris[t1], -1); countEdges(tris[t2], -1);
+          for (const [ti, os] of [[t1, [a, b, d]], [t2, [b, c, d]]]) { const m3 = anchorOf3(os); tris[ti] = { owners: os, x: tripleVertex(os, m3), anchor: m3 }; }
+          add(t1); add(t2); countEdges(tris[t1], 1); countEdges(tris[t2], 1); flips++;
+          for (const [p, q] of [[a, b], [b, c], [c, d], [d, a]]) queue.push(pairKey(p, q));
+        }
+        return flips;
+      };
+      return { onEdge, flipPass };
+    };
+
+    // 4a. Anisotropic Delaunay (option metric, Idea 3). On z = ½ xᵀQx three tangent planes meet above
+    //     the Q-circumcenter of their tangent points, at height error −½ R_Q², so the best triangulation
+    //     of a convex or concave patch is the Delaunay triangulation in the metric Q. Q (the shape
+    //     operator) is estimated at each tangent point from its neighbors in the current triangulation:
+    //     the symmetric S that best maps tangent offsets to normal offsets, n_b − n_a ≈ S (t_b − t_a).
+    //     Lawson flips then use the in-circle test in M = |S̄| + ε max|λ(S̄)| I, with S̄ the average of the
+    //     quad's four tensors in the frame of its mean normal: |·| makes saddles definite, and ε keeps
+    //     developable parts (one zero curvature) from degenerating, so their triangles become strips
+    //     about 1/√ε times longer along the rulings than across them.
+    if (o.metric) {
+      const nbrs = new Map();
+      for (const t of tris) for (let r = 0; r < 3; r++) { const a = t.owners[r]; if (!nbrs.has(a)) nbrs.set(a, new Set()); nbrs.get(a).add(t.owners[(r + 1) % 3]); nbrs.get(a).add(t.owners[(r + 2) % 3]); }
+      const frame = n => { const u = Math.abs(n[0]) < 0.9 ? [0, -n[2], n[1]] : [-n[2], 0, n[0]], l = Math.hypot(u[0], u[1], u[2]);
+        u[0] /= l; u[1] /= l; u[2] /= l; return [u, [n[1] * u[2] - n[2] * u[1], n[2] * u[0] - n[0] * u[2], n[0] * u[1] - n[1] * u[0]]]; };
+      const dot = (p, q) => p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+      const S3 = new Map(); // owner -> shape operator as a 3 × 3 tensor U S Uᵀ
+      // A point is a feature (not resolved as smooth by the samples) when its normal turns by more than
+      // metricFeature radians per sample spacing: max|λ(S)| · h > metricFeature, h its mean distance to its neighbors. Its
+      // estimate mixes the two sides of a crease, so quads with a feature point are left to the planes.
+      const feature = new Set();
+      for (const [a, N] of nbrs) {
+        const { normal: na, point: ta } = planes.get(a), [u, w] = frame(na);
+        const G = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], h = [0, 0, 0]; // normal equations for (s11, s12, s22)
+        for (const b of N) {
+          const { normal: nb, point: tb } = planes.get(b), d = [tb[0] - ta[0], tb[1] - ta[1], tb[2] - ta[2]], g = [nb[0] - na[0], nb[1] - na[1], nb[2] - na[2]];
+          const dx = dot(d, u), dy = dot(d, w), gx = dot(g, u), gy = dot(g, w), wt = 1 / (dx * dx + dy * dy || 1);
+          for (const [row, rhs] of [[[dx, dy, 0], gx], [[0, dx, dy], gy]]) for (let i = 0; i < 3; i++) { h[i] += wt * row[i] * rhs; for (let j = 0; j < 3; j++) G[i][j] += wt * row[i] * row[j]; }
+        }
+        for (let i = 0; i < 3; i++) G[i][i] += 1e-12;
+        const [s11, s12, s22] = solve3(G, h), T = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+        let hs = 0; for (const b of N) hs += Math.sqrt(dist2(ta, planes.get(b).point)) / N.size;
+        if ((Math.abs((s11 + s22) / 2) + Math.hypot((s11 - s22) / 2, s12)) * hs > o.metricFeature) feature.add(a);
+        for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) T[i][j] = s11 * u[i] * u[j] + s12 * (u[i] * w[j] + w[i] * u[j]) + s22 * w[i] * w[j];
+        S3.set(a, T);
+      }
+      // In-circle test of d against (a, b, c) in the quad's metric; > 0 when d is inside, i.e. edge ac is
+      // not Delaunay. Also reports whether the quad a, b, c, d is convex in that metric.
+      const metricTest = (a, b, c, d) => {
+        const os = [a, b, c, d], N = [0, 0, 0], C = [0, 0, 0], T = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+        for (const x of os) { const P = planes.get(x), Tx = S3.get(x); for (let i = 0; i < 3; i++) { N[i] += P.normal[i]; C[i] += P.point[i] / 4; for (let j = 0; j < 3; j++) T[i][j] += (Tx ? Tx[i][j] : 0) / 4; } }
+        const nl = Math.hypot(N[0], N[1], N[2]); if (!nl) return { inside: 0, convex: false };
+        const [u, w] = frame([N[0] / nl, N[1] / nl, N[2] / nl]);
+        const Tu = [0, 1, 2].map(i => T[i][0] * u[0] + T[i][1] * u[1] + T[i][2] * u[2]), Tw = [0, 1, 2].map(i => T[i][0] * w[0] + T[i][1] * w[1] + T[i][2] * w[2]);
+        const m11 = dot(u, Tu), m12 = (dot(u, Tw) + dot(w, Tu)) / 2, m22 = dot(w, Tw);
+        // |M|: eigen-decomposition of the symmetric 2 × 2, absolute eigenvalues, plus ε max|λ|.
+        const tr = (m11 + m22) / 2, disc = Math.hypot((m11 - m22) / 2, m12), l1 = tr + disc, l2 = tr - disc;
+        const th = 0.5 * Math.atan2(2 * m12, m11 - m22), cs = Math.cos(th), sn = Math.sin(th);
+        // On flat parts S is round-off: the floor 1e-6 / (quad size) keeps the metric isotropic there.
+        let size = 0; for (const x of os) size += Math.sqrt(dist2(planes.get(x).point, C)) / 4;
+        const big = Math.max(Math.abs(l1), Math.abs(l2)), eps = o.metricEps * big + 1e-6 / (size || 1);
+        const r1 = Math.sqrt(Math.abs(l1) + eps), r2 = Math.sqrt(Math.abs(l2) + eps); // L = diag(r) Rᵀ, M = LᵀL
+        const map = x => { const p = planes.get(x).point, d = [p[0] - C[0], p[1] - C[1], p[2] - C[2]], px = dot(d, u), py = dot(d, w);
+          return [r1 * (cs * px + sn * py), r2 * (-sn * px + cs * py)]; };
+        const [A, B, Cc, D] = os.map(map);
+        const orient = (p, q, r) => (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+        const o1 = orient(A, B, Cc), sg = o1 > 0 ? 1 : -1;
+        const convex = [orient(A, B, Cc), orient(B, Cc, D), orient(Cc, D, A), orient(D, A, B)].every(x => sg * x > 0);
+        const ad = [A[0] - D[0], A[1] - D[1]], bd = [B[0] - D[0], B[1] - D[1]], cd = [Cc[0] - D[0], Cc[1] - D[1]];
+        const det = (ad[0] * ad[0] + ad[1] * ad[1]) * (bd[0] * cd[1] - bd[1] * cd[0]) - (bd[0] * bd[0] + bd[1] * bd[1]) * (ad[0] * cd[1] - ad[1] * cd[0]) + (cd[0] * cd[0] + cd[1] * cd[1]) * (ad[0] * bd[1] - ad[1] * bd[0]);
+        const scale = Math.max(...[A, B, Cc, D].map(p => p[0] * p[0] + p[1] * p[1])) ** 2 || 1;
+        return { inside: sg * det / scale, convex };
+      };
+      const { flipPass } = flipper();
+      // The metric varies from quad to quad, so flips can cycle (at features, where tangent points on an
+      // edge mix the two sides' normals): each set of four faces is flipped at most twice.
+      const seen = new Map();
+      stats.metricFeatures = feature.size;
+      stats.metricFlips = flipPass((a, b, c, d) => {
+        if (feature.has(a) || feature.has(b) || feature.has(c) || feature.has(d)) return false;
+        const r = metricTest(a, b, c, d); if (!r.convex || !(r.inside > 1e-9)) return false;
+        const key = [a, b, c, d].sort((p, q) => p - q).join(','), n = seen.get(key) || 0;
+        if (n >= 2) return false;
+        seen.set(key, n + 1); return true;
+      });
+    }
+
     // 4b. Collapse and flip (option rank). On developable surfaces (planes, cylinders, cones) the
     //     normals around a face span one or two directions, so many dual triangles have dependent
     //     planes and no triple point near the surface. See RECOVERY.md, Approach 5.
@@ -983,13 +1107,14 @@
     //       edge's direction on the line P_p ∩ P_q is set by whether p-q is convex or concave). Each
     //       flip lowers the total cost, so the flips end.
     //     Options: rank = true (all three), 'collapse', 'lawson' (the first one or two steps).
+    inFlips = true;
     const repOf = new Map(); // collapsed owner -> the owner it was merged into
+    const members = new Map(); // representative owner -> owners merged into it
     if (o.rank) {
       const detOf = os => { const [n1, n2, n3] = os.map(a => planes.get(a).normal);
         return n1[0] * (n2[1] * n3[2] - n2[2] * n3[1]) - n1[1] * (n2[0] * n3[2] - n2[2] * n3[0]) + n1[2] * (n2[0] * n3[1] - n2[1] * n3[0]); };
       const dependent = () => { let ex = 0, near = 0; for (const t of tris) { const D = Math.abs(detOf(t.owners)); if (D < 1e-9) ex++; else if (D < 1e-3) near++; } return [ex, near]; };
       stats.dependentBefore = dependent();
-      const members = new Map(); // representative owner -> owners merged into it
       rhoOf = (m, os) => {
         if (!(o.trust < Infinity)) return Infinity;
         let far = 0;
@@ -1038,9 +1163,7 @@
         const quadKind = (a, b, c, d) => { // -1: all four edges convex, +1: all concave, 0: mixed
           const ty = [etypeOf(a, b), etypeOf(b, c), etypeOf(c, d), etypeOf(d, a)];
           return ty.every(e => e <= 0) && ty.includes(-1) ? -1 : ty.every(e => e >= 0) && ty.includes(1) ? 1 : 0; };
-        const onEdge = new Map(), add = ti => { const o3 = tris[ti].owners; for (let r = 0; r < 3; r++) { const key = pairKey(o3[r], o3[(r + 1) % 3]); if (!onEdge.has(key)) onEdge.set(key, new Set()); onEdge.get(key).add(ti); } };
-        const del = ti => { const o3 = tris[ti].owners; for (let r = 0; r < 3; r++) onEdge.get(pairKey(o3[r], o3[(r + 1) % 3]))?.delete(ti); };
-        tris.forEach((_, ti) => add(ti));
+        const { onEdge, flipPass } = flipper();
         const hasDir = (os, p, q) => { const i = os.indexOf(p); return i >= 0 && os[(i + 1) % 3] === q; };
         const planeSys = os => { const A = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], r = [0, 0, 0];
           for (const a of os) { const { normal: n, point: t } = planes.get(a), c = n[0] * t[0] + n[1] * t[1] + n[2] * t[2];
@@ -1087,36 +1210,16 @@
           }
           return s;
         };
-        // One flip pass over a queue of edges; test(a, b, c, d, t1, t2) decides for triangles
-        // (a, b, c), (a, c, d) whether to replace them by (a, b, d), (b, c, d).
-        const flipPass = test => {
-          const queue = [...onEdge.keys()]; let flips = 0;
-          for (let guard = 0; queue.length && guard < 50 * tris.length; guard++) {
-            const key = queue.pop(), ts = onEdge.get(key);
-            if (!ts || ts.size !== 2) continue;
-            const [t1, t2] = [...ts], [e0, e1] = key.split(',').map(Number), o1 = tris[t1].owners;
-            const r = [0, 1, 2].find(i => { const p = o1[i], q = o1[(i + 2) % 3]; return (p === e0 && q === e1) || (p === e1 && q === e0); });
-            if (r === undefined) continue;
-            const a = o1[r], b = o1[(r + 1) % 3], c = o1[(r + 2) % 3], o2 = tris[t2].owners, s2 = o2.indexOf(a);
-            if (s2 < 0 || o2[(s2 + 1) % 3] !== c) continue;
-            const d = o2[(s2 + 2) % 3];
-            if (b === d || edgeCount.has(pairKey(b, d)) || !test(a, b, c, d, t1, t2)) continue;
-            del(t1); del(t2); countEdges(tris[t1], -1); countEdges(tris[t2], -1);
-            for (const [ti, os] of [[t1, [a, b, d]], [t2, [b, c, d]]]) { const m3 = anchorOf3(os); tris[ti] = { owners: os, x: tripleVertex(os, m3), anchor: m3 }; }
-            add(t1); add(t2); countEdges(tris[t1], 1); countEdges(tris[t2], 1); flips++;
-            for (const [p, q] of [[a, b], [b, c], [c, d], [d, a]]) queue.push(pairKey(p, q));
-          }
-          return flips;
-        };
         stats.envelopeFlips = flipPass((a, b, c, d) => {
           const kappa = quadKind(a, b, c, d); if (!kappa) return false;
           const m = anchorOf3([a, b, c]), scale = Math.max(...[a, b, c, d].map(u => Math.sqrt(dist2(m, planes.get(u).point)))) || 1;
-          return kappa * sigma * det4([a, b, c, d], m) < -1e-9 * scale && sigma * detOf([a, b, d]) > 1e-12 && sigma * detOf([b, c, d]) > 1e-12;
+          return kappa * sigma * det4([a, b, c, d], m) < -1e-9 * scale && sigma * detOf([a, b, d]) > 1e-12 && sigma * detOf([b, c, d]) > 1e-12
+            && containViol(b, d) <= containViol(a, c);
         });
         if (o.rank !== 'lawson') stats.mixedFlips = flipPass((a, b, c, d, t1, t2) => {
           if (quadKind(a, b, c, d)) return false;
           const scale = Math.sqrt(Math.max(dist2(planes.get(a).point, planes.get(c).point), dist2(planes.get(b).point, planes.get(d).point)));
-          return quadCost(a, b, c, d, t1, t2, [[a, b, d], [b, c, d]]) < quadCost(a, b, c, d, t1, t2, [[a, b, c], [a, c, d]]) - 1e-6 * scale;
+          return quadCost(a, b, c, d, t1, t2, [[a, b, d], [b, c, d]]) + containViol(b, d) < quadCost(a, b, c, d, t1, t2, [[a, b, c], [a, c, d]]) + containViol(a, c) - 1e-6 * scale;
         });
       }
       stats.dependentAfter = dependent();
@@ -1215,7 +1318,72 @@
     polys.push(...chamferPolys);
     if (agree < 0) for (const P of polys) P.verts.reverse(); // face the + side
     stats.facelessOwners = [...planes.keys()].filter(a => !byOwner.has(a) && !repOf.has(a)).length;
-    return { verts, anchors, vertOwners, polys, patchStats: stats, triangles: tris.map(t => t.owners), triVerts: vid };
+    if (o.soft) stats.soft = softVertices(verts, anchors, polys, planes, members, o.soft === true ? {} : o.soft, vertOwners.map((os, i) => rhoOf(anchors[i], os)));
+    return { verts, anchors, vertOwners, polys, patchStats: stats, triangles: tris.map(t => t.owners), triVerts: vid, members };
+  }
+
+  // ---------- Soft vertex optimization (Idea 6) ----------
+  // With the connectivity fixed, move the vertices (in place) to minimize
+  //   Σ_faces a Σ_{x ∈ F_a} f_a(x)²  +  μ Σ |x − m|²  +  w Σ_edges max(0, −g)²,
+  // where m is a vertex's initial position (pull: 'initial', the triple point or its trust-limited
+  // version) or its anchor (pull: 'anchor', the mean of its faces' contour positions, which on long strip
+  // faces is far from the strip's ends) and, for an edge x_v -> x_w of face a (counter-
+  // clockwise seen from the + side), g = (n_a × (x_w − x_v)) · (t_a − x_v) / |x_w − x_v| is the signed
+  // distance of t_a inside that edge's line: the face should be star-shaped around its tangent point.
+  // Faces of collapsed owners (several tangent points) are not constrained. Nearly dependent planes
+  // leave a direction free; μ holds the vertex near its target there (Tikhonov), and each vertex stays
+  // within its trust radius of its anchor. g is linear in x_v when x_w is fixed, so block Gauss–Seidel over the vertices solves a 3 × 3
+  // system per vertex, with the active (violated) hinges as extra rows.
+  const SOFT_DEFAULTS = { mu: 0.01, contain: 0, iters: 30, pull: 'initial' };
+  // rho (optional): per vertex, the largest distance it may move from its anchor (the trust radius).
+  function softVertices(verts, anchors, polys, planes, members, opts, rho) {
+    const o = { ...SOFT_DEFAULTS, ...opts };
+    const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    const onPlanes = verts.map(() => []), edges = verts.map(() => []); // per vertex: planes; [w, owner, v is the edge's start]
+    for (const P of polys) {
+      if (P.chamfer || P.gap || !planes.has(P.owner)) continue;
+      const L = P.verts, single = (members.get(P.owner) || [P.owner]).length === 1;
+      L.forEach((v, k) => {
+        if (!onPlanes[v].includes(P.owner)) onPlanes[v].push(P.owner);
+        if (!single || !o.contain) return;
+        const w = L[(k + 1) % L.length];
+        edges[v].push([w, P.owner, true]); edges[w].push([v, P.owner, false]);
+      });
+    }
+    // g and its gradient in the moving endpoint, for the edge s -> e of face a.
+    const hinge = (xs, xe, a) => {
+      const { normal: n, point: t } = planes.get(a), e = [xe[0] - xs[0], xe[1] - xs[1], xe[2] - xs[2]], l = Math.hypot(e[0], e[1], e[2]);
+      if (l < 1e-12) return null;
+      const m = cross(n, e); return { g: dot(m, [t[0] - xs[0], t[1] - xs[1], t[2] - xs[2]]) / l, m, l };
+    };
+    const violation = () => { let worst = 0, n = 0;
+      verts.forEach((x, v) => { for (const [w, a, start] of edges[v]) if (start) { const h = hinge(x, verts[w], a); if (h && h.g < -1e-9) { n++; worst = Math.max(worst, -h.g); } } });
+      return { n, worst }; };
+    const target = o.pull === 'anchor' ? anchors : verts.map(x => x.slice());
+    const before = violation();
+    for (let it = 0; it < o.iters; it++) {
+      verts.forEach((x, v) => {
+        const A = [[o.mu, 0, 0], [0, o.mu, 0], [0, 0, o.mu]], m0 = target[v], r = [o.mu * m0[0], o.mu * m0[1], o.mu * m0[2]];
+        const row = (c, rhs, wt) => { for (let i = 0; i < 3; i++) { r[i] += wt * c[i] * rhs; for (let j = 0; j < 3; j++) A[i][j] += wt * c[i] * c[j]; } };
+        for (const a of onPlanes[v]) { const { normal: n, point: t } = planes.get(a); row(n, dot(n, t), 1); }
+        // Active hinges, linear in x: for v the start, g(x) = (n × (x_w − x))·(t − x)/l = (m·t − (m + t × n)·x)/l
+        // with m = n × x_w (the term (n × x)·x vanishes); for v the end, g(x) = (n × (x − x_s))·(t − x_s)/l.
+        for (const [w, a, start] of edges[v]) {
+          const h = start ? hinge(x, verts[w], a) : hinge(verts[w], x, a);
+          if (!h || h.g >= 0) continue;
+          const { normal: n, point: t } = planes.get(a);
+          if (start) { const mw = cross(n, verts[w]), tn = cross(t, n), c = [(mw[0] + tn[0]) / h.l, (mw[1] + tn[1]) / h.l, (mw[2] + tn[2]) / h.l]; row(c, dot(mw, t) / h.l, o.contain); }
+          else { const xs = verts[w], d = [t[0] - xs[0], t[1] - xs[1], t[2] - xs[2]], c = cross(d, n).map(z => z / h.l); // (n × x)·d = x·(d × n)
+            row(c, dot(cross(n, xs), d) / h.l, o.contain); } // g = x·c − (n × x_s)·d / l >= 0, pushed to 0
+        }
+        const y = solve3(A, r);
+        if (!y.every(Number.isFinite)) return;
+        const m = anchors[v], d = Math.sqrt(dist2(y, m)), R = rho ? rho[v] : Infinity;
+        verts[v] = d > R ? [m[0] + (y[0] - m[0]) * R / d, m[1] + (y[1] - m[1]) * R / d, m[2] + (y[2] - m[2]) * R / d] : y;
+      });
+    }
+    return { before, after: violation(), iters: o.iters };
   }
 
   // ---------- Approach 4: tangent balls, and merging steps into faces ----------
@@ -1321,7 +1489,7 @@
     return { verts, polys, gapWidth };
   }
 
-  const api = { recoverSurface, triangulatePatches, PATCH_DEFAULTS, extendOwnFaces, mirroredSites, contourNeighbors, clipTangentPlanes, CLIP_DEFAULTS,
+  const api = { recoverSurface, triangulatePatches, PATCH_DEFAULTS, softVertices, SOFT_DEFAULTS, extendOwnFaces, mirroredSites, contourNeighbors, clipTangentPlanes, CLIP_DEFAULTS,
     tangentBallSites, emptyBallRadii, BALL_DEFAULTS, mergeSteps, MERGE_DEFAULTS };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Recover = api;

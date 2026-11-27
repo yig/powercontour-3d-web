@@ -1,6 +1,7 @@
 // The comparison table of RECOVERY.md: every recovery method on the same samples, plus the raw
-// power contour. `node figures/compare.js [n] [sampling]` prints Markdown rows. The fandisk is
-// included if FANDISK (default ../../code-release/examples/fandisk.obj) exists.
+// power contour. `node figures/compare.js [n] [sampling]` prints Markdown rows. The fandisk and the horse
+// are included if FANDISK (default ../../code-release/examples/fandisk.obj) and HORSE (default gpytoolbox's
+// test data in ../../../paper-math-code) exist.
 // Settings are the viewer's defaults: seed 1, s = 0.1, exact tau, trust 2, tangent balls ρ = 0.5, cap 100.
 'use strict';
 const fs = require('fs'), path = require('path');
@@ -108,26 +109,36 @@ const METHODS = [
   }],
 ];
 
-const shapes = [['torus', Shapes.torus], ['two spheres', Shapes.twospheres], ['box', Shapes.box], ['cylinder', Shapes.cylinder]];
-const FANDISK = process.env.FANDISK || path.join(__dirname, '../../../code-release/examples/fandisk.obj');
-if (fs.existsSync(FANDISK)) shapes.push(['fandisk', Shapes.fromOBJ(fs.readFileSync(FANDISK, 'utf8'), 1)]);
-
+function allShapes() {
+  const shapes = [['torus', Shapes.torus], ['two spheres', Shapes.twospheres], ['box', Shapes.box], ['cylinder', Shapes.cylinder]];
+  const FANDISK = process.env.FANDISK || path.join(__dirname, '../../../code-release/examples/fandisk.obj');
+  if (fs.existsSync(FANDISK)) shapes.push(['fandisk', Shapes.fromOBJ(fs.readFileSync(FANDISK, 'utf8'), 1)]);
+  const HORSE = process.env.HORSE || path.join(__dirname, '../../../../paper-math-code/code/third_party/gpytoolbox/test/unit_tests_data/horse.obj');
+  if (fs.existsSync(HORSE)) shapes.push(['horse', Shapes.fromOBJ(fs.readFileSync(HORSE, 'utf8'), 1)]);
+  return shapes;
+}
 const f3 = x => x < 1e-9 ? '0' : x < 1e-3 ? x.toExponential(0).replace('e', '·10^') : x.toFixed(3);
-console.log(`n = ${N}, sampling = ${SAMPLING}`);
-console.log('| shape | method | max error | off > 0.02 | vertices | tangent-plane faces + extra | hole edges | off-plane | area |');
-console.log('|---|---|---|---|---|---|---|---|---|');
-for (const [name, shape] of shapes) {
-  const inputs = samplePoints(N, SAMPLING, 1, shape.sdf);
-  const diagrams = { false: build(shape, inputs, false), true: build(shape, inputs, true) };
-  for (const balls of [false, true]) {
-    const c = contourStats(diagrams[balls], shape.sdf);
-    console.log(`| ${name} | power contour${balls ? ', tangent balls' : ', s = 0.1'} | ${f3(c.maxErr)} | ${(100 * c.offFrac).toFixed(0)}% | ${c.nFaces} faces | ${(100 * c.ownFrac).toFixed(0)}% own (area) | 0 | — | ${c.area.toFixed(2)} |`);
-  }
-  for (const [mname, balls, run] of METHODS) {
-    const D = diagrams[balls], t0 = Date.now();
-    let r;
-    try { r = run(D); } catch (e) { console.log(`| ${name} | ${mname} | error: ${e.message} |`); continue; }
-    const s = surfaceStats(r, D.planes, shape.sdf);
-    console.log(`| ${name} | ${mname} | ${f3(s.maxErr)} | ${s.nOff} | ${s.nVerts} | ${s.nFaces} + ${s.nExtra} | ${r.soup ? 'soup' : s.holes} | ${f3(s.offPlane)} | ${s.area.toFixed(2)} | ${Date.now() - t0} ms`);
+
+function main() {
+  console.log(`n = ${N}, sampling = ${SAMPLING}`);
+  console.log('| shape | method | max error | off > 0.02 | vertices | tangent-plane faces + extra | hole edges | off-plane | area |');
+  console.log('|---|---|---|---|---|---|---|---|---|');
+  for (const [name, shape] of allShapes()) {
+    const inputs = samplePoints(N, SAMPLING, 1, shape.sdf);
+    const diagrams = { false: build(shape, inputs, false), true: build(shape, inputs, true) };
+    for (const balls of [false, true]) {
+      const c = contourStats(diagrams[balls], shape.sdf);
+      console.log(`| ${name} | power contour${balls ? ', tangent balls' : ', s = 0.1'} | ${f3(c.maxErr)} | ${(100 * c.offFrac).toFixed(0)}% | ${c.nFaces} faces | ${(100 * c.ownFrac).toFixed(0)}% own (area) | 0 | — | ${c.area.toFixed(2)} |`);
+    }
+    for (const [mname, balls, run] of METHODS) {
+      const D = diagrams[balls], t0 = Date.now();
+      let r;
+      try { r = run(D); } catch (e) { console.log(`| ${name} | ${mname} | error: ${e.message} |`); continue; }
+      const s = surfaceStats(r, D.planes, shape.sdf);
+      console.log(`| ${name} | ${mname} | ${f3(s.maxErr)} | ${s.nOff} | ${s.nVerts} | ${s.nFaces} + ${s.nExtra} | ${r.soup ? 'soup' : s.holes} | ${f3(s.offPlane)} | ${s.area.toFixed(2)} | ${Date.now() - t0} ms`);
+    }
   }
 }
+
+module.exports = { samplePoints, build, contourStats, surfaceStats, allShapes, f3, B, OFF, METHODS };
+if (require.main === module) main();
