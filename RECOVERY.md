@@ -1,6 +1,6 @@
 # Recovering a surface from the power contour
 
-This note describes the structure of the power contour of samples plus tangent points, and four ways to turn it into a surface with one face per tangent point: *Contract contour regions*, *Extend own faces*, *Triangulate step patches*, and *Merge steps into faces* on a diagram with different generators (*tangent balls*). Code: `recover.js` (`recoverSurface`, `extendOwnFaces`, `triangulatePatches`, `tangentBallSites`, `mergeSteps`, `qefTruncated`). Another method, *Clip tangent planes*, is described in `ARCHITECTURE.md`.
+This note describes the structure of the power contour of samples plus tangent points, and five ways to turn it into a surface with one face per tangent point: *Contract contour regions*, *Extend own faces*, *Triangulate step patches*, *Merge steps into faces* on a diagram with different generators (*tangent balls*), and *Collapse and flip*, which post-processes Triangulate step patches' dual triangulation. Code: `recover.js` (`recoverSurface`, `extendOwnFaces`, `triangulatePatches`, `tangentBallSites`, `mergeSteps`, `qefTruncated`). Another method, *Clip tangent planes*, is described in `ARCHITECTURE.md`.
 
 ## Setup
 
@@ -223,7 +223,7 @@ Triangulate step patches uses three controls: the sphere scale `s` (it changes t
 ### Open problems in this approach
 
 - **A box corner** (1500 samples): many tangent points coincide exactly at the corner, with different normals, and the triangles there are combinatorially inconsistent, leaving 8 hole edges. All their vertices are the corner point itself, so the gaps have zero length.
-- **Jagged faces near `K = 0`** (the torus's inner top circle in the screenshot): with chamfers every face there is planar, yet the region still looks folded. So the cause is the triangulation (which faces meet), not planarity. The true structure, long faces along the flat direction, is not built directly; the chamfers (310 on the torus, tiny orange slivers) only keep the vertices near the surface.
+- **Jagged faces near `K = 0`** (the torus's inner top circle in the screenshot): with chamfers every face there is planar, yet the region still looks folded. So the cause is the triangulation (which faces meet), not planarity. The true structure, long faces along the flat direction, is not built directly; the chamfers (310 on the torus, tiny orange slivers) only keep the vertices near the surface. Approach 5 (Collapse and flip) reworks the triangulation with flips toward the planes' envelope: on the torus the chamfers drop to 66 and the vertices off to 5, but the region near `K = 0` still looks folded, and on a cylinder the flips cannot build the long faces (tie quads).
 - **Stitching on saddles** uses closeness to the other planes; using the two readings of step 4 there might remove its loss at `s = 1`.
 - **The decider** combines a cost comparison with a structural rule (2 groups against 4). It fixes the crease patches but is heuristic.
 - **The crease's worst vertices** (0.16 off with uniform samples, against 0.067 for Contract contour regions).
@@ -329,7 +329,7 @@ Snap halves the off-plane distance at the cost of a slightly larger worst error 
 
 Runtime, 1500 samples: the empty radii take 20–30 ms (`O(n²)`), the power diagram 2.2–5.1 s (against 2.2–3.4 s with sample spheres: big balls make the clipping order less effective), merging 50–190 ms.
 
-**Developable surfaces.** On the cylinder the faces are strips along the rulings, up to 4.3 spacings long, as the envelope predicts, and every vertex is within 0.001 of the surface (against 0.030 for Triangulate step patches, which needs to intersect nearly dependent planes). There are no far vertices in the sense of Approaches 1–3: the strips' vertices are cell vertices on the surface. The strips are ragged rather than straight, since each strip is assembled from steps of different heights, and they end after a few spacings rather than spanning the cylinder.
+**Developable surfaces.** On the cylinder the faces are strips along the rulings, up to 4.3 spacings long, as the envelope predicts, and every vertex is within 0.001 of the surface (against 0.030 for Triangulate step patches, which needs to intersect nearly dependent planes). There are no far vertices in the sense of Approaches 1–3: the strips' vertices are cell vertices on the surface. The strips are ragged rather than straight, since each strip is assembled from steps of different heights, and they end after a few spacings rather than spanning the cylinder. Collapse and flip (Approach 5) tries to reach the same structure by flipping the dual triangulation of Approach 3, and gets strips only next to the caps.
 
 | cylinder: Triangulate step patches | cylinder: Merge steps into faces |
 |---|---|
@@ -372,6 +372,147 @@ The contour of the tangent-ball diagram has a few hole edges on the box (17 at 1
 - **Strips.** On the cylinder the strips end after about 4 spacings and are ragged; a straighter, longer strip would need the step heights to vanish, i.e. a larger cap or a better labeling of steps.
 
 Reference: N. Amenta, S. Choi and R. K. Kolluri, The power crust, *Proc. ACM Symposium on Solid Modeling and Applications*, 2001.
+
+## Approach 5: Collapse and flip (`triangulatePatches`, option `rank`)
+
+Triangulate step patches (Approach 3) builds a dual triangulation: one vertex per own face, one triangle `(a, b, c)` per output vertex `P_a ∩ P_b ∩ P_c`. On developable surfaces (planes, cylinders, cones) the normals around a face span only one or two directions, so many triangles have dependent planes. Their triple point is far away or does not exist, and the trust region and chamfers (step 8 of Approach 3) hide the problem. Collapse and flip post-processes that triangulation in three steps, before the vertices are placed:
+
+1. **Collapse** dual edges whose two planes coincide.
+2. **Envelope flips** (Lawson) in quads whose four edges are all convex or all concave, with a test that needs no triple point.
+3. **Mixed-quad flips** in quads with both convex and concave edges, lowering a cost made of far vertices and inverted edges.
+
+Vertices and faces are then built exactly as in Approach 3 (exact intersection, chamfer beyond the trust radius, faces as the duals). Option `rank` of `triangulatePatches`: `true` runs all three steps, `'collapse'` and `'lawson'` stop after the first one or two. In the viewer it is the method *Collapse and flip*, with the same controls as Triangulate step patches. It adds no parameters: it uses `tau` and the trust radius, and fixed tolerances (planes are the same below `10⁻⁷`; a tie is `|D4| ≤ 10⁻⁹` × the quad's size; a mixed flip must gain `10⁻⁶` × its size).
+
+### Dependent triangles
+
+Fraction of dual triangles whose three normals are exactly dependent (`|det(n_a, n_b, n_c)| < 10⁻⁹`) / nearly dependent (`< 10⁻³`), 1500 samples, `s = 0.1`, before and after Collapse and flip:
+
+| | Triangulate step patches | Collapse and flip |
+|---|---|---|
+| torus | 0 / 394 of 3000 | 0 / 327 of 3000 |
+| two spheres | 0 / 167 of 2996 | 0 / 167 of 2996 |
+| box | 2039 / 4 of 2347 | 1171 / 4 of 1479 |
+| box, near surface | 2941 / 0 of 2996 | 283 / 0 of 338 |
+| cylinder, near surface | 2732 / 0 of 2996 | 1877 / 9 of 2258 |
+| fandisk | 587 / 515 of 2390 | 208 / 484 of 2082 |
+| fandisk, near surface | 1137 / 1030 of 2998 | 72 / 934 of 1966 |
+| fandisk, 4000 near surface | 3470 / 3097 of 7963 | 306 / 2991 of 4903 |
+
+The collapse removes most exactly dependent triangles (two identical planes). The nearly dependent ones mostly remain; see *Where the errors are* below for why that matters less than expected.
+
+### 1. Collapse
+
+Two own faces with the same plane are one face: an edge between them carries no information. A dual edge `a–b` whose planes coincide (normals and offsets equal to `10⁻⁷`) is collapsed, merging `b` into `a`, when the link condition holds (the common neighbors of `a` and `b` are exactly the two vertices opposite the edge), so the triangulation stays a manifold. The merged face keeps all its tangent points. This matters for the trust radius: the radius of a vertex is the trust factor times the distance from its anchor to the farthest of its faces' tangent points, and a merged face must use its *nearest* tangent point there. A first prototype used the representative's own tangent point, which can be far across a big merged face; trust radii became huge and far intersections were accepted (fandisk, 1500 near-surface samples: max error 0.154 → 1.047 from the collapse alone). With the nearest tangent point, collapsing alone gives max 0.154, 79 off (82 before), and makes the near-surface box exact (max 0.198, 11 off before).
+
+The link condition stops some merges: on the cylinder's flat cap two faces remain, and the box keeps 1171 exactly dependent triangles (coplanar pairs whose collapse would make a non-manifold edge). Those are harmless: `qefTruncated` drops the dependent direction exactly.
+
+### 2. The envelope test without triple points
+
+Write each plane as a vector `h_a = (n_a, −n_a·t_a)`, so `f_a(x) = h_a · (x, 1)`. The triple point of `(a, b, c)` is the `X` with `h · X = det[h_a; h_b; h_c; h]` for every `h`, and its last coordinate is `D3(a,b,c) = det[n_a; n_b; n_c]`. Hence
+
+```
+f_d(x_abc) = D4(a,b,c,d) / D3(a,b,c),     D4 = det[h_a; h_b; h_c; h_d]
+```
+
+(checked numerically to `2·10⁻¹⁵`). Approach 3's envelope test for an edge `ac` between triangles `(a, b, c)` and `(a, c, d)` asks whether plane `d` is on the envelope's side of `x_abc` (convex: `f_d ≤ 0`; concave: `f_d ≥ 0`). Where the Gauss map keeps orientation (`K > 0`, convex or concave), `D3` of every consistently oriented triangle has the same sign `σ` (measured as the sign of `Σ D3` over all triangles). So the edge is on the envelope iff
+
+```
+κ σ D4(a,b,c,d) ≥ 0,     κ = −1 (convex), +1 (concave).
+```
+
+This is the in-sphere test of the lifted dual points, written in the planes. It has three useful properties:
+
+- It needs no triple point, so it holds when `x_abc` is at infinity (`D3 = 0`, the strips of a cylinder).
+- It is symmetric: `D4(a,c,d,b) = D4(a,b,c,d)`, so testing `x_acd` against `b` gives the same answer. A flip to `(a, b, d), (b, c, d)` negates `D4` (an odd permutation), so exactly one diagonal passes unless `D4 = 0`.
+- Four planes whose normals are coplanar (all ⊥ to a cylinder's axis) have `D4 = 0`: a tie. The test cannot choose, and no flip happens.
+
+A quad is flipped when its four edges are all convex or all concave (edge types read from the tangent points, as in Approach 3: `f_a(t_b) + f_b(t_a) < 0` is convex), the test fails by more than the tie tolerance, `bd` is not already an edge, and both new triangles keep the orientation (`σ D3 > 0`: the quad is convex in the Gauss image). A strip triangle with `D3 = 0` can be flipped away, never created. Flips are queued Lawson-style (the four outer edges of a flipped quad are re-tested).
+
+### 3. Mixed quads
+
+Where convex and concave edges meet (features of mixed type, saddles), there is no envelope; Approach 3 reads such loops as lattice (max–min) polyhedra. The envelope test is not used there. Instead each quad gets a cost, and an edge is flipped when that lowers it:
+
+- **Far vertices:** for each of the quad's two triangles, how far its exact triple point is beyond the trust radius of its anchor (capped at the radius; the full radius if the three planes have no common point).
+- **Inverted edges:** for each of the quad's five edges `p–q` (the diagonal and the four outer edges, each measured against the triangle across it), the two triangles on the edge put their vertices on the line `P_p ∩ P_q`, at `x_0 + λu`, `u = n_p × n_q`, `λ = −f_r(x_0) / (n_r · u)` for the third face `r`. Walking around face `p` counterclockwise from outside, the edge with `q` goes along `+u` if `p–q` is convex and along `−u` if concave (times `σ`). A negative signed length is an inverted edge, a fold; its cost is that length, capped at `trust × |t_p − t_q|`. Parallel planes have no edge at all and cost the cap.
+
+In an all-convex quad the inversion of the diagonal is exactly the envelope test (a non-regular diagonal has negative length), so this is its generalization to mixed edge types, with the edge types again from the tangent points. Only the quad's terms change when it is flipped, so every flip lowers the total cost over the whole triangulation and the flips end. The step between two parallel planes on the fandisk (a top face, a vertical wall and a lower face parallel to the top, 0.2 below) is the typical case: Approach 3 can make the two parallel faces adjacent, an edge with no line, which this cost removes.
+
+### What failed
+
+All on top of the collapse, measured in the same runs as the table below (variants in commit `84f4870`).
+
+| | torus | cylinder | cylinder, near surface | fandisk, near surface | fandisk, 4000 near surface |
+|---|---|---|---|---|---|
+| Triangulate step patches | 0.055, 14 off | 0.012, 0 off | 0.030, 2 off | 0.154, 82 off | 0.128, 35 off |
+| collapse only | 0.055, 14 | 0.012, 0 | 0.030, 2 | 0.154, 79 | 0.128, 33 |
+| naive: raise min \|det\| | 0.055, 17 | 0.251, 72 | 0.112, 41 | 0.143, 109 | 0.214, 132 |
+| envelope flips only (`'lawson'`) | 0.026, 7 | 0.012, 0 | 0.006, 0 | 0.154, 67 | 0.128, 26 |
+| far + inversion cost on all quads | 0.025, 5 | 1.179, 625 (area 4.44) | 0.875, 208 | 0.129, 54 | 0.157, 47 |
+| **Collapse and flip** (envelope + mixed) | **0.025, 5** | **0.012, 0** | **0.006, 0** | 0.173, **40** | **0.084, 14** |
+
+- **Naive flips** (flip a quad when it raises the smaller `|det|` of its two triangles, as in the first prototype) reduce dependent triangles (fandisk near: 1135 → 844 after the collapse) but put more vertices off the surface everywhere. Independent normals are necessary but not sufficient: the new triple point exists, but it is the intersection of planes that are not neighbors in the planes' arrangement (on the cylinder, two strips that are not angular neighbors plus a cap). In the first prototype this was hidden behind the collapse's trust-radius bug (max 1.047).
+- **The cost on every quad** (not just mixed ones) is good on smooth shapes and on the fandisk at 1500, but destroys the cylinder: in tie quads (four strips, `D4 = 0`) every triangle is "far" (three parallel lines have no common point), and the cost happily replaces them with triangles whose planes do meet, but at the wrong place: the same failure as the naive flips. Restricting the cost to mixed quads and leaving ties alone fixes this.
+- **Flipping bad triangles** (a triangle beyond the trust radius flips an edge when both new triangles are within it, after the envelope flips) changed little where it helped and made the uniform fandisk worse (max 0.307 → 0.524); dropped.
+
+### Results
+
+1500 samples unless noted, seed 1, `s = 0.1`, exact `tau`, trust 2; "off" counts vertices with `|sdf| > 0.02`, "holes" are directed polygon edges without a reversed twin, "off-plane" is the largest distance from a face's vertex to its own tangent plane. Merge steps into faces (Approach 4, tangent balls) is quoted from its table: same samples, but different sites, and 2–6 times as many vertices.
+
+| | Contract contour regions | Triangulate step patches | **Collapse and flip** | Merge steps into faces |
+|---|---|---|---|---|
+| torus | 0.076, 64 off | 0.055, 14 off, 310 chamfers | **0.025, 5 off**, 66 chamfers | 0.041, 33 off |
+| torus, near surface | 0.033, 24 off | 0.035, 2 off, 229 chamfers | 0.028, 1 off, 44 chamfers | **0.016, 0 off** |
+| two spheres | 0.067, 27 off | 0.163, 37 off | 0.116, 38 off | **0.039**, 50 off |
+| two spheres, near surface | 0.056, 8 off | 0.127, 18 off, off-plane 0.01 | 0.061, 8 off, off-plane `3·10⁻¹⁴` | **0.013, 0 off** |
+| box | exact, 0 holes | exact, 8 holes (length 0) | exact, 8 holes (length 0) | `3·10⁻⁴`, 17 holes |
+| box, near surface | 0.042, 3 off | 0.198, 11 off | **exact**, 154 faces | `2·10⁻⁴` |
+| cylinder | 0.022, 2 off | 0.012, 0 off | 0.012, 0 off | — |
+| cylinder, near surface | 0.066, 7 off, 3 holes | 0.030, 2 off | 0.006, 0 off | **0.001, 0 off**, 3 holes |
+| fandisk | 0.299, 131 off | 0.307, 214 off, 478 chamfers | 0.307, 101 off, 215 chamfers | **0.135**, 344 off |
+| fandisk, near surface | 0.101, 48 off | 0.154, 82 off, 553 chamfers | 0.173, 40 off, 206 chamfers | **0.096**, 210 off |
+| fandisk, 4000 near surface | 0.085, 15 off, 31 holes | 0.128, 35 off, 71 holes | 0.084, 14 off, 68 holes | **0.052**, 106 off, 3 holes |
+| torus, 300 | 0.240, 173 off | 0.288, 137 off | 0.173, 94 off | **0.091** |
+| torus, `s = 1` | 0.076, 65 off | 0.126, 38 off | **0.036, 8 off** | — |
+| cylinder, 300 | **0.068**, 31 off | 0.739, 40 off | 0.261, 15 off | — |
+| fandisk, near surface, `s = 1` | **0.091**, 39 off | 0.207, 67 off | 0.129, 25 off | — |
+
+Areas are within 0.1 of Triangulate step patches everywhere (true: torus 8.88, two spheres 6.91, box 6.64, cylinder 5.97, fandisk 8.82; Collapse and flip: 9.03, 6.92, 6.64, 5.98, 8.85). Hole edges are those of Triangulate step patches (they come from its partitioned patches): 0 except on the box (8, of length 0) and the 4000-sample fandisk (68). Faces stay exactly planar wherever Approach 3's are (off-plane `10⁻¹³`; 0.07–0.1 on the fandisk, from pairs of nearly parallel planes whose line is beyond the trust radius). Flips: 515 envelope + 292 mixed on the torus, 210 + 0 on the near-surface cylinder, 311 + 645 on the near-surface fandisk; collapses: 1329 on the near-surface box, 369 on the cylinder, 516 on the fandisk. Runtime is within 40% of Triangulate step patches (fandisk, 4000: 0.73 s against 0.77 s, power diagram excluded). Triangulate step patches gives identical numbers with the option off.
+
+So among the plane-intersection methods (Approaches 1 and 3) Collapse and flip has the fewest vertices off, or as few, on every case except the uniform two spheres (38 against 27), removes most chamfers, and makes the near-surface box exact. Its worst vertex is worse than Contract contour regions' on the fandisk at 1500 samples (0.173 against 0.101) and on the sparse cylinder. Merge steps into faces (Approach 4) is more accurate on most shapes, but its faces are planar only up to the step heights and it keeps every contour vertex; it is not exact on the box.
+
+| torus | cylinder, near surface | fandisk, near surface |
+|---|---|---|
+| ![Torus recovered by Collapse and flip.](figures/torus-collapse.png) | ![Capped cylinder recovered by Collapse and flip: the cap is merged into two faces, strips hang from the rim, the side is still isotropic.](figures/cylinder-collapse.png) | ![Fandisk recovered by Collapse and flip: flat faces merged, strips along the concave fillets.](figures/fandisk-collapse.png) |
+
+*Collapse and flip, 1500 samples (compare `torus-patches.png`, `cylinder-patches.png`, `fandisk-patches.png` in Approaches 3 and 4, and Contract contour regions on the fandisk below). Torus: same look as Triangulate step patches, with fewer chamfers; the jagged region on the inner top circle (`K = 0`) remains. Cylinder: the cap collapses into two faces (the link condition stops the last merge), and envelope flips hang long strips from the rim, but only one or two rows deep: the side stays isotropic. Fandisk: the large flat faces collapse into single faces, and the faces on the cylindrical fillets become strips along the rulings; artifacts remain near the features at the right.*
+
+![Fandisk recovered by Contract contour regions.](figures/fandisk-regions.png)
+
+*Contract contour regions on the same fandisk samples, for comparison: isotropic faces everywhere, also on flat parts.*
+
+### Where the errors are
+
+Dependent triangles are not where most errors are. Fandisk, 1500 near-surface samples, dual triangles by `|D3|`, counting a triangle as off if any of its points is off by more than 0.02:
+
+| | Triangulate step patches: exact vertex | chamfered | Collapse and flip: exact vertex | chamfered |
+|---|---|---|---|---|
+| `|D3| < 10⁻⁹` | 1133, 3 off | 4, 0 off | 72, 0 off | — |
+| `10⁻⁹ ≤ |D3| < 10⁻³` | 615, 9 off | 415, 13 off | 779, 9 off | 155, 5 off |
+| `10⁻³ ≤ |D3| < 10⁻²` | 248, 8 off | 93, 4 off | 324, 5 off | 33, 1 off |
+| `|D3| ≥ 10⁻²` | 449, 14 off | 41, 18 off | 585, 13 off | 18, 5 off |
+
+Nearly dependent triangles are off 1–3% of the time; chamfered *independent* triangles 28–44%: those are wrong combinatorics (planes that meet, but not as neighbors), mostly at features. The dependence mostly produces chamfers (clutter) rather than errors, because `qefTruncated` and the trust radius already handle it.
+
+Why the remaining bad triangles (exact vertex beyond the trust radius, or no common point) are not flipped, after the envelope flips, by the reason at each of their three edges: on the exact cylinder (1500 uniform) 952 of 1160 have three tie quads (`D4 = 0`, four strips); on the near-surface cylinder 1623 of 1875. On the near-surface fandisk most are in mixed quads (131 of 471 at all three edges), which step 3 then handles. On the torus they are split between mixed quads and quads whose flip would reverse the Gauss-image orientation (saddles).
+
+### Open problems in this approach
+
+- **Strips through developable regions.** In a cylinder the true faces are strips along the rulings, ending where they meet a plane with an independent normal (a cap, a crease). The dual of that is a ladder: each strip `s_i` is adjacent to `s_{i−1}`, `s_{i+1}` and the faces at both ends. Local flips cannot get there: every quad of four strips is a tie, so flips only reach one or two rows from the cap (visible in the cylinder figure). A direct construction is needed: find the cluster of faces whose normals are ⊥ a common direction `d`, order them by angle about `d`, remove the triangles among them and their ring, and stitch the angular chain to the boundary loops at both ends (two Fuchs–Kedem–Uselton stitchings, as in Approach 3's two-loop patches, with the envelope cost). On the exact cylinder this would make the side faces exactly planar (off-plane 0.005 now, from the least-squares points of three parallel lines); the vertex errors are already small (max 0.006). Approach 4's tangent balls get the strips from the diagram instead (ragged, about 4 spacings long).
+- **The trust radius is a weak test of "near the surface".** The worst fandisk vertex (0.173) is an exact intersection of independent planes, 0.32 from its anchor but within the radius (2 × 0.31). A stricter radius in the flip cost alone (trust 1 or 1.5) only moved the errors around (0.139 / 52 off and 0.129 / 43 off against 0.173 / 40 off). The samples' empty spheres `B(p, |d|)` are a data-only lower bound on the error: a vertex inside one is at least that deep off the surface. It catches 16 of the 67 off vertices on the near-surface fandisk after the envelope flips, with 2 false alarms in 2791 (at depth > 0.01), so it could join the cost.
+- **Edge types from tangent points** decide convex, concave and mixed quads, and the direction of every edge in the mixed cost. For two nearly parallel offset planes (a step) `f_a(t_b) + f_b(t_a) ≈ 0` and the type is noise; such edges are handled only because parallel planes cost the cap.
+- **The link condition** keeps some coplanar faces apart (two faces on the cylinder's cap). Merging them as one face with a hole or a pinch would need the face-walking of Approach 1's topology cases.
+- **Sparse samples** (cylinder, 300): 0.261 against 0.068 for Contract contour regions; the triangulation of Approach 3 is already poor there (0.739) and the flips only partly repair it.
+- **Saddles** keep their mixed quads; the mixed cost terminates but is a heuristic, as the decider of Approach 3 is.
 
 ## Topology of the regions
 
